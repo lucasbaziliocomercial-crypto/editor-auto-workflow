@@ -1,0 +1,52 @@
+# ===== Segredos / config local =====
+# O .env real tem o token do ClickUp — nunca versionar. Use editor-auto.env.example como base.
+editor-auto.env
+*.env
+!*.env.example
+
+# ===== Binário compilado =====
+Editor Auto.exe
+*.exe
+
+# ===== Cache / build Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+
+# ===== Mídia (renders, áudios, imagens, fontes de vídeo) =====
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.tiff
+
+# ===== Entregas / renders finais (100% mídia) =====
+/ENTREGAS/
+/VIDEOS-PRONTOS/
+
+# ===== Estado transitório da esteira =====
+*.running
+*.entregue
+*.pausas_otimizadas
+
+# ===== SO / editor =====
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,17 @@
+# Normaliza fim-de-linha: texto sempre LF no repo, ferramentas Windows lidam local.
+* text=auto eol=lf
+
+# Artefatos de produção são texto puro (feed de TTS) — trate como texto.
+*.txt text
+*.srt text
+*.json text
+
+# Binários (caso algum escape do .gitignore): nunca fazer diff/merge textual.
+*.ttf binary
+*.otf binary
+*.ico binary
+*.mp4 binary
+*.mp3 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
