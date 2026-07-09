@@ -1,0 +1,26 @@
+VISUAL STYLE
+Cinematic dark romance. Warm amber-gold chandelier light against cool winter darkness. Rich contrast between opulent ballroom interiors — heavy drapes, white porcelain, crystal flutes — and the raw cold of snow-covered Telluride outside. Color palette: deep black, warm ivory, slate gray, burnished gold. Mood: restrained tension, quiet power, longing held just below the surface.
+
+[Character 1: Leander Wexford Vale] — the billionaire hero
+- Face/Hair/Eyes/Skin: strong angular jaw with light stubble; thick dark brown hair swept back from the forehead in a polished wave; dark brown eyes, intense and unreadable; warm medium-tan complexion
+- Age/Build: early-to-mid thirties; tall, broad-shouldered, fills a suit effortlessly without looking bulky — lean power, not brute
+- Signature wardrobe: black peak-lapel tuxedo, crisp white dress shirt with black stud buttons, silk black bow tie, white pocket square; no jewelry
+- Ref image: referencias/ref_homem_1.png
+
+[Character 2: Anouk Bellwether] — the maid heroine
+- Face/Hair/Eyes/Skin: soft oval face with delicate features; light olive skin with faint natural freckles across the nose and cheeks; green-hazel eyes, wide and expressive; medium brown hair worn in a loose, slightly undone updo bun with soft face-framing strands
+- Age/Build: mid-to-late twenties; slight, slender frame with quiet resilience in her posture
+- Signature wardrobe: slate-gray short-sleeve hotel maid uniform with white collar piping and white apron; later seen in a simple dark dress (her late mother Odessa's)
+- Ref image: referencias/ref_mulher_2.png
+
+[Secondary — Wren Marlowe] — Anouk's coworker and closest friend; same gray maid uniform; sharp-tongued, loyal, always ready with a crushed granola bar or a pointed truth.
+
+[Secondary — Sable Bellwether] — Anouk's younger teenage brother; dark tousled hair, asthmatic, dry humor that masks how perceptive he is; the reason Anouk never quits.
+
+[Secondary — Halberd] — the hotel supervisor; tight hair bun, pinched expression, a smile that is never a smile; represents institutional cruelty dressed as protocol.
+
+[Secondary — Cordelia Ashworth] — socialite antagonist; blond, metallic blue gown, champagne flute perpetually in hand; weaponizes elegance as cruelty.
+
+[Secondary — Corbin Ashford] — Leander's attorney; charcoal-gray suit, leather briefcase, thin and precise; dry irony concealing genuine loyalty to Leander.
+
+[Secondary — Elsworth Vane] — veteran journalist; white hair, glasses, small notebook; the moral witness of the story.

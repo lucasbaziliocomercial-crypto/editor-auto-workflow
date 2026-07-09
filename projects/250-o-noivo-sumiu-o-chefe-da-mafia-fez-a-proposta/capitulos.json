@@ -1,0 +1,35 @@
+{
+  "hook_chars": 562,
+  "capitulos": [
+    {
+      "n": 1,
+      "titulo": "The bell tolled for the last time",
+      "primeira_frase": "The bouquet trembled in my hand, and I couldn't decide whether it"
+    },
+    {
+      "n": 2,
+      "titulo": "The offer from the man the town fears",
+      "primeira_frase": "Café Vecchia Roma sat on a corner of the old neighborhood where"
+    },
+    {
+      "n": 3,
+      "titulo": "House rules, the man's gestures",
+      "primeira_frase": "The Caracciolo mansion woke before I did."
+    },
+    {
+      "n": 4,
+      "titulo": "The shadow returns",
+      "primeira_frase": "Two weeks later, I learned that a mansion sleeps differently from normal"
+    },
+    {
+      "n": 5,
+      "titulo": "The truth without a contract",
+      "primeira_frase": "The folder under his arm was too thick."
+    },
+    {
+      "n": 6,
+      "titulo": "The door that closes, the morning that dawns",
+      "primeira_frase": "His hand was warm on my cheek."
+    }
+  ]
+}

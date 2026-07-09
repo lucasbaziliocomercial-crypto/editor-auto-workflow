@@ -1,0 +1,30 @@
+{
+  "hook_chars": 445,
+  "capitulos": [
+    {
+      "n": 1,
+      "titulo": "The Empty Chair",
+      "primeira_frase": "The alarm went off before five, and Anouk silenced it with her"
+    },
+    {
+      "n": 2,
+      "titulo": "Guest of Honor",
+      "primeira_frase": "Halberd's hand was still clamped around Anouk's arm when he began to"
+    },
+    {
+      "n": 3,
+      "titulo": "Refusal Comes at a Price",
+      "primeira_frase": "The supervisor's office was in the hotel's basement, in a corridor that"
+    },
+    {
+      "n": 4,
+      "titulo": "The Name in the Report",
+      "primeira_frase": "The dead archive was in the basement, behind a steel door no"
+    },
+    {
+      "n": 5,
+      "titulo": "Outside the Door",
+      "primeira_frase": "The week passed as if each day had decided to fit into"
+    }
+  ]
+}
