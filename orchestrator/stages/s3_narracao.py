@@ -45,13 +45,33 @@ def preparar_texto(proj, log):
         raise ErroPipeline("Falta roteiro.txt (Etapa 1) para narrar.")
     bruto = proj.roteiro.read_text(encoding="utf-8", errors="replace")
     est = roteiro_estrutura.parse_roteiro(bruto)
-    texto = roteiro_estrutura.texto_narracao(bruto)
+
+    # P2 = voz dupla: separa a narração em segmentos ♂/♀ por POV (marcador ✦ ou
+    # detecção pelo character_bible). P1 = voz única (texto limpo padrão).
+    seg_file = proj.dir / "narracao_segmentos.json"
+    segmentos = None
+    if _parte(proj) == "p2":
+        segmentos = _segmentos_p2(proj, bruto, log)
+    if segmentos:
+        seg_file.write_text(json.dumps(segmentos, ensure_ascii=False, indent=2), encoding="utf-8")
+        texto = "\n\n".join(s["texto"] for s in segmentos)
+    else:
+        seg_file.unlink(missing_ok=True)  # evita resíduo de uma rodada P2 anterior
+        texto = roteiro_estrutura.texto_narracao(bruto)
     if not texto.strip():
         raise ErroPipeline("roteiro.txt não produziu texto de narração (vazio após limpeza).")
 
     proj.roteiro_tts.write_text(texto, encoding="utf-8")
-    caps = [{"n": c["n"], "titulo": c["titulo"], "primeira_frase": c["primeira_frase"]}
-            for c in est["chapters"]]
+    if segmentos:
+        # na P2 a narração não fala as linhas ✦ — a âncora tem que casar com a SRT real.
+        import vozes_p2
+        caps = [{"n": c["n"], "titulo": c["titulo"],
+                 "primeira_frase": roteiro_estrutura._primeira_frase(
+                     vozes_p2.limpar_marcadores(c["corpo"]))}
+                for c in est["chapters"]]
+    else:
+        caps = [{"n": c["n"], "titulo": c["titulo"], "primeira_frase": c["primeira_frase"]}
+                for c in est["chapters"]]
     (proj.dir / "capitulos.json").write_text(
         json.dumps({"hook_chars": len(est["hook"]), "capitulos": caps},
                    ensure_ascii=False, indent=2), encoding="utf-8")
@@ -59,26 +79,68 @@ def preparar_texto(proj, log):
         % (len(est["hook"]), len(caps)))
 
 
+def _segmentos_p2(proj, bruto, log):
+    """Segmentos de voz ♂/♀ da P2 (ou None se não aplicável). Usa o character_bible
+    da P1 (reaproveitado na pasta -p2) pra inferir o gênero dos leads."""
+    try:
+        import vozes_p2
+    except ImportError as e:
+        log("  ⚠ P2: módulo vozes_p2 indisponível (%s) — narração em voz única." % e)
+        return None
+    bible = ""
+    if proj.existe(proj.character_bible):
+        bible = proj.character_bible.read_text(encoding="utf-8", errors="replace")
+    segs = vozes_p2.segmentos_p2(bruto, bible)
+    if not segs:
+        return None
+    n, cm, cf = vozes_p2.resumo_segmentos(segs)
+    tem_m = any(s["genero"] == "m" for s in segs)
+    log("  P2 voz dupla: %d segmento(s) — ♂ %d chars / ♀ %d chars%s"
+        % (n, cm, cf, "" if tem_m else " (sem POV masculino detectado — sai em voz única)"))
+    return segs
+
+
 # ---------------------------------------------------------------------------
 # Voz do canal
 # ---------------------------------------------------------------------------
 
-def _voz_primaria(proj, log):
-    """ID CapCut da voz do canal (lido do source.json). '' se o canal não tem id capturado."""
-    canal = ""
+def _canal(proj):
+    """Nome do canal (List do card), do source.json. '' se ausente."""
     if proj.existe(proj.source):
         try:
-            canal = (json.loads(proj.source.read_text(encoding="utf-8")).get("canal") or "").strip()
+            return (json.loads(proj.source.read_text(encoding="utf-8")).get("canal") or "").strip()
         except (OSError, ValueError):
             pass
-    nome, vid = common.voz_do_canal(canal, "f")
+    return ""
+
+
+def _parte(proj):
+    """'p1' | 'p2' — lido do source.json (semeado pelo pipeline na pasta -p2)."""
+    if proj.existe(proj.source):
+        try:
+            return (json.loads(proj.source.read_text(encoding="utf-8")).get("parte") or "p1").strip().lower()
+        except (OSError, ValueError):
+            pass
+    return "p1"
+
+
+def _voz_do_canal_id(proj, genero, log):
+    """ID CapCut da voz do canal para o gênero pedido ('f'/'m'). Cai na Joanne se o
+    canal não tem id capturado. A P1 sempre usa 'f'; a P2 usa 'm'/'f' por segmento."""
+    canal = _canal(proj)
+    nome, vid = common.voz_do_canal(canal, genero)
     if not vid:
-        log("  ⚠ voz '%s' do canal '%s' sem id CapCut capturado — usando a cadeia de fallback "
-            "(Joanne/cool_lady)." % (nome, canal or "?"))
+        log("  ⚠ voz '%s' (%s) do canal '%s' sem id CapCut — usando fallback (Joanne/cool_lady)."
+            % (nome, genero, canal or "?"))
         vid = os.environ.get("CAPCUT_TTS_VOICE", common.VOZ_IDS.get("joanne", ""))
     else:
-        log("  voz do canal '%s': %s (%s)" % (canal or "?", nome, vid))
+        log("  voz do canal '%s' (%s): %s (%s)" % (canal or "?", genero, nome, vid))
     return vid
+
+
+def _voz_primaria(proj, log):
+    """ID da voz feminina do canal (compat: a P1 é voz única feminina)."""
+    return _voz_do_canal_id(proj, "f", log)
 
 
 def _voice_chain(voz_primaria, log=None):
@@ -167,42 +229,89 @@ def _tentar_cadeia(bloco, cadeia, chunk_mp3, base, i, n,
     return None
 
 
-def synthesize(proj, log, cancel=None):
-    """Gera narration.mp3 (provider CapCut) narrando roteiro_tts.txt com a voz do canal."""
-    from capcut_tts import garantir_sidecar
+def _blocos_de_narracao(proj, maxlen, log):
+    """Lista ordenada de (voz_primaria, texto_bloco) para o TTS.
 
+    P1 (ou canal de voz única): todos os blocos na voz feminina do canal.
+    P2 (narracao_segmentos.json presente): cada segmento ♂/♀ recebe a voz masculina
+    ou feminina do canal e é fatiado em blocos ≤ maxlen. Fundir vozes iguais já foi
+    feito no vozes_p2, então a alternância aqui é só onde o POV realmente muda."""
+    seg_file = proj.dir / "narracao_segmentos.json"
+    if proj.existe(seg_file):
+        try:
+            segs = json.loads(seg_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            segs = []
+        if segs:
+            voz_f = _voz_do_canal_id(proj, "f", log)
+            dupla_on = os.environ.get("ROTEIRO_P2_VOZ_DUPLA", "1").strip().lower() \
+                not in ("0", "off", "nao", "não", "no", "false")
+            voz_m = _voz_do_canal_id(proj, "m", log) if dupla_on else voz_f
+            if not dupla_on:
+                log("    ROTEIRO_P2_VOZ_DUPLA desligado — P2 em voz feminina (✦ ainda removidos).")
+            blocos = []
+            for s in segs:
+                v = voz_m if s.get("genero") == "m" else voz_f
+                for b in _chunizar(s.get("texto", ""), maxlen):
+                    if b.strip():
+                        blocos.append((v, b))
+            dual = voz_m != voz_f
+            n_m = sum(1 for v, _ in blocos if v == voz_m)
+            if dual:
+                log("    P2 voz dupla ATIVA: ♂ %s / ♀ %s — %d bloco(s) ♂, %d bloco(s) ♀."
+                    % (voz_m, voz_f, n_m, len(blocos) - n_m))
+            else:
+                log("    P2 em voz única (canal com ♂==♀=%s) — marcadores ✦ removidos da fala."
+                    % voz_f)
+            if blocos:
+                return blocos, dual
+    # Caminho padrão (P1) — voz feminina única, a partir do roteiro_tts.txt.
     fonte = proj.roteiro_tts if proj.existe(proj.roteiro_tts) else proj.roteiro
     texto = fonte.read_text(encoding="utf-8", errors="replace").strip()
     if not texto:
         raise ErroPipeline("%s vazio — nada para narrar." % fonte.name)
+    voz = _voz_primaria(proj, log)
+    return [(voz, b) for b in _chunizar(texto, maxlen)], False
+
+
+def synthesize(proj, log, cancel=None):
+    """Gera narration.mp3 (provider CapCut). Voz única (P1) ou alternada ♂/♀ (P2)."""
+    from capcut_tts import garantir_sidecar
+
     maxlen = int(os.environ.get("LONGFORM_TTS_CHUNK_CHARS", "1500"))
-    cadeia = _voice_chain(_voz_primaria(proj, log), log=log)
-    log("▶ Etapa 3 — TTS CapCut (idioma=%s, cadeia=%s, chunk=%d chars)."
-        % (nome_idioma(), ", ".join(cadeia), maxlen))
+    blocos, _dual = _blocos_de_narracao(proj, maxlen, log)
+    n = len(blocos)
+    total_chars = sum(len(b) for _, b in blocos)
+    log("▶ Etapa 3 — TTS CapCut (idioma=%s, chunk=%d chars): %d chars em %d bloco(s)."
+        % (nome_idioma(), maxlen, total_chars, n))
 
     base = garantir_sidecar(log=log)
-    blocos = _chunizar(texto, maxlen)
-    log("    %d chars em %d bloco(s)." % (len(texto), len(blocos)))
 
     cooldown_limite = int(os.environ.get("LONGFORM_TTS_VOICE_COOLDOWN", "3"))
     max_esperas = int(os.environ.get("LONGFORM_TTS_RATELIMIT_RETRIES", "6"))
     wait_base = float(os.environ.get("LONGFORM_TTS_RATELIMIT_WAIT", "45"))
     wait_max = float(os.environ.get("LONGFORM_TTS_RATELIMIT_WAIT_MAX", "300"))
-    falhas_consec = {v: 0 for v in cadeia}
+    # Estado de rate-limit compartilhado por TODAS as vozes que podem entrar (primárias
+    # ♂/♀ + fallbacks), já que a cadeia muda de bloco pra bloco na P2.
+    todas = set()
+    for voz_primaria, _ in blocos:
+        todas.update(_voice_chain(voz_primaria))
+    falhas_consec = {v: 0 for v in todas}
     queimadas = set()
 
     partes, vozes_usadas = [], []
-    for i, bloco in enumerate(blocos, 1):
+    for i, (voz_primaria, bloco) in enumerate(blocos, 1):
         if cancel is not None and cancel.is_set():
             raise ErroPipeline("Cancelado pelo usuário.")
         chunk_mp3 = proj.dir / ("_tts_%02d.mp3" % i)
         if proj.existe(chunk_mp3):
-            log("    bloco %d/%d já existe — pulado." % (i, len(blocos)))
+            log("    bloco %d/%d já existe — pulado." % (i, n))
             partes.append(chunk_mp3); continue
+        cadeia = _voice_chain(voz_primaria)
 
         espera_n = 0
         while True:
-            voz_ok = _tentar_cadeia(bloco, cadeia, chunk_mp3, base, i, len(blocos),
+            voz_ok = _tentar_cadeia(bloco, cadeia, chunk_mp3, base, i, n,
                                     queimadas, falhas_consec, cooldown_limite, log)
             if voz_ok is not None:
                 vozes_usadas.append(voz_ok); break
@@ -217,7 +326,7 @@ def synthesize(proj, log, cancel=None):
                 % (i, espera, espera_n, max_esperas))
             _esperar_cancelavel(espera, cancel)
             queimadas.clear()
-            for v in cadeia:
+            for v in todas:
                 falhas_consec[v] = 0
 
         if not proj.existe(chunk_mp3):
@@ -228,14 +337,14 @@ def synthesize(proj, log, cancel=None):
         shutil.copyfile(partes[0], proj.narration_mp3)
     else:
         _concat_mp3(partes, proj.narration_mp3, log)
-    for i in range(1, len(blocos) + 1):
+    for i in range(1, n + 1):
         (proj.dir / ("_tts_%02d.mp3" % i)).unlink(missing_ok=True)
     if not proj.existe(proj.narration_mp3):
         raise ErroPipeline("CapCut TTS não produziu narration.mp3.")
     if vozes_usadas:
         ranking = Counter(vozes_usadas).most_common()
         log("    ✓ narration.mp3 pronto. Vozes usadas: %s."
-            % ", ".join("%s×%d" % (v, n) for v, n in ranking))
+            % ", ".join("%s×%d" % (v, k) for v, k in ranking))
 
 
 # ---------------------------------------------------------------------------

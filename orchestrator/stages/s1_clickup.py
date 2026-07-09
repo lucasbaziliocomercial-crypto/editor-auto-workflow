@@ -195,6 +195,16 @@ def run(proj, log, cancel=None, *, card_id=None, categoria=None, **_):
 
     roteiro_p1 = abas[1].strip()
     roteiro_p2 = (abas.get(2) or "").strip()
+    # Guarda: o roteiro DEVE estar em inglês com cabeçalhos "Chapter N —" (é o que a
+    # esteira parseia). Zero capítulos = Doc errado (quase sempre a versão PT rotulada
+    # "Roteiro em português") — falha ALTO aqui, senão a Etapa 3 gera narração do texto
+    # errado e a Etapa 4 só quebra bem depois. Override manual: env ROTEIRO_DOC_URL.
+    if _contar_caps(roteiro_p1) == 0:
+        raise ErroPipeline(
+            "O Doc %s (Tab 1) não tem NENHUM capítulo em inglês (linhas 'Chapter N —'). "
+            "Provavelmente é a versão em PORTUGUÊS (ou premissa), não o roteiro EN. "
+            "Confira o link do roteiro EN nos comentários do card e, se preciso, force com "
+            "a env ROTEIRO_DOC_URL=<link do Doc EN> antes de rodar a Etapa 1." % doc_id)
     proj.roteiro.write_text(roteiro_p1, encoding="utf-8")
     log("  P1 (Tab 1): %d caps, %d palavras -> %s"
         % (_contar_caps(roteiro_p1), len(roteiro_p1.split()), proj.roteiro.name))

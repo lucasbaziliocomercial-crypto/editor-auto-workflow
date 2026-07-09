@@ -132,9 +132,46 @@ def materiais_canal(canal):
     return base
 
 
+# Herança de materiais: canais que reusam os materiais FIXOS de outro (mesmos drop-ins — CTA,
+# book2, capa, último-minuto). A diferença entre eles é só a VOZ (ver CANAL_VOZ). Decisão do
+# editor 2026-07-09: Rowan e Kay usam os materiais da Lena. O item PRÓPRIO (se o editor largar
+# um na pasta do canal) sempre vence; o herdado só preenche o que faltar.
+# Override/desliga por env ROTEIRO_HERDA_<CANAL>=<base>  (ex.: ROTEIRO_HERDA_ROWAN= desliga).
+MATERIAIS_HERDA = {"rowan": "lena", "kay": "lena"}
+
+
+def canal_base_materiais(canal):
+    """Slug do canal-base cujos materiais fixos <canal> herda (ou None se não herda)."""
+    ch = slugify(canal or "", maxlen=40)
+    alvo = MATERIAIS_HERDA.get(ch)
+    if alvo is None:
+        for chave, base in MATERIAIS_HERDA.items():
+            if chave in ch:               # nome de List "sujo" (ex.: "Rowan EN")
+                alvo = base
+                break
+    ov = os.environ.get("ROTEIRO_HERDA_" + ch.upper().replace("-", "_"))
+    if ov is not None:                    # env presente (mesmo vazio) sobrescreve
+        alvo = ov.strip() or None
+    if alvo and slugify(alvo, maxlen=40) == ch:
+        alvo = None                       # não herda de si mesmo
+    return alvo
+
+
+def materiais_dirs(canal):
+    """Pastas de materiais na ORDEM de busca: [pasta do canal] (+ [pasta herdada] se houver).
+    Quem lê material fixo deve varrer esta lista e usar o 1º que existir (próprio vence)."""
+    dirs = [materiais_canal(canal)]
+    base = canal_base_materiais(canal)
+    if base:
+        dirs.append(materiais_canal(base))
+    return dirs
+
+
 # Modelos por canal (arquivos que o editor anexa 1x). Guardados em materiais/<canal>/modelos.json.
 #   capa_ref  = vídeo de troca de capítulo de referência (a automação replica a animação/formato/fonte)
-#   cta_final = clipe da CTA final;  resumo_p2 = clipe do resumo da Parte 2 (fallback; hoje é por-vídeo)
+#   cta_final / resumo_p2 = agora só FALLBACK. Desde 2026-07-09 (resumo_cta.py) resumo P2 e CTA são
+#     GERADOS reusando os clipes do teaser: CTA usa a base fixa materiais/<canal>/cta/cta_base.mp4
+#     (só o áudio é fixo); resumo P2 = TTS do bloco-gancho do roteiro. Estes só entram se a geração falhar.
 # (capa_bg/capa_fonte foram aposentados: fundo é dinâmico por capítulo e a fonte é embutida.)
 MODELOS_CHAVES = ("capa_ref", "cta_final", "resumo_p2")
 
@@ -143,8 +180,8 @@ def modelos_arquivo(canal):
     return materiais_canal(canal) / "modelos.json"
 
 
-def ler_modelos(canal):
-    """Dict {capa_ref, cta_final, resumo_p2} com os caminhos escolhidos (ou '')."""
+def _ler_modelos_bruto(canal):
+    """Modelos SÓ do próprio canal (sem herança). Base p/ leitura e gravação."""
     p = modelos_arquivo(canal)
     if p.is_file():
         try:
@@ -155,11 +192,24 @@ def ler_modelos(canal):
     return {k: "" for k in MODELOS_CHAVES}
 
 
+def ler_modelos(canal):
+    """Dict {capa_ref, cta_final, resumo_p2} com os caminhos escolhidos (ou '').
+    Chave em branco herda do canal-base (Rowan/Kay ← Lena; ver canal_base_materiais)."""
+    d = _ler_modelos_bruto(canal)
+    base = canal_base_materiais(canal)
+    if base:
+        bd = _ler_modelos_bruto(base)
+        for k in MODELOS_CHAVES:
+            if not d.get(k):
+                d[k] = bd.get(k, "")
+    return d
+
+
 def salvar_modelo(canal, chave, caminho):
     """Grava (referencia, não copia) o caminho de um modelo do canal em modelos.json."""
     if chave not in MODELOS_CHAVES:
         raise ValueError("chave de modelo inválida: %s" % chave)
-    d = ler_modelos(canal)
+    d = _ler_modelos_bruto(canal)         # não persiste os valores herdados no json do canal
     d[chave] = str(caminho or "")
     modelos_arquivo(canal).write_text(
         json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")

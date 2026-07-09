@@ -31,7 +31,7 @@ import subprocess
 from pathlib import Path
 
 from common import (ErroPipeline, achar_ffmpeg, SUBPROCESS_FLAGS, parse_srt,
-                    materiais_canal, ler_modelos, IMG_EXTS)
+                    materiais_canal, materiais_dirs, ler_modelos, IMG_EXTS)
 
 VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi")
 
@@ -762,7 +762,16 @@ def construir(proj, log, cancel=None, parte=None):
     # "parte" do source.json (semeado pelo pipeline na pasta da P2).
     extensao = str(parte).lower() == "p2"
     base_mat = materiais_canal(canal)
+    mat_dirs = materiais_dirs(canal)      # [pasta própria] (+ herdada: Rowan/Kay ← Lena)
     modelos = ler_modelos(canal)
+
+    def _drop_mat(sub):
+        """Clipes de <sub> varrendo materiais próprios e, se vazio, os herdados (Lena)."""
+        for d in mat_dirs:
+            r = _drop(d, sub)
+            if r:
+                return r
+        return []
 
     tmp = proj.dir / "out"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -796,7 +805,7 @@ def construir(proj, log, cancel=None, parte=None):
         hook_dur = max(1.0, bnds[0]) if bnds else min(8.0, total)
         # Teaser é POR VÍDEO: lê de projects/<slug>/teaser/ (isolado deste card). Só cai no
         # drop-in por canal (materiais/<canal>/teaser/) como fallback legado, se o projeto não tiver.
-        teaser_clips = _drop(proj.dir, "teaser") or _drop(base_mat, "teaser")
+        teaser_clips = _drop(proj.dir, "teaser") or _drop_mat("teaser")
         seg = _seg_path("00_teaser")
         if not (seg.exists() and seg.stat().st_size > 0):
             vmudo = tmp / "_v_teaser.mp4"
@@ -882,7 +891,7 @@ def construir(proj, log, cancel=None, parte=None):
                     alvo = p
                     break
         if alvo is None:
-            clipes = _drop(base_mat, subpasta)
+            clipes = _drop_mat(subpasta)
             if clipes:
                 alvo = clipes[0]
             elif modelos.get(modelo_key) and Path(modelos[modelo_key]).is_file():
@@ -904,16 +913,49 @@ def construir(proj, log, cancel=None, parte=None):
     if extensao:
         log("    P2 (extensão): sem resumo P2 nem CTA (só capas + corpo).")
     else:
-        resumo = _drop_seg("90_resumo", "book2", "resumo_p2", proj_stem="resumo_p2")
+        # GERAÇÃO (2026-07-09): resumo P2 e CTA são gerados reusando os clipes do teaser (Veo)
+        # como visual — mesma referência, cenas sempre diferentes. Só cai no drop-in legado
+        # (_drop_seg) se a geração não for possível (sem teaser, sem texto de resumo, sem base
+        # de CTA). Ver resumo_cta.py.
+        import resumo_cta
+        teaser_clips = _drop(proj.dir, "teaser") or _drop_mat("teaser")
+
+        resumo = None
+        try:
+            resumo = resumo_cta.construir_resumo_p2(proj, base_mat, teaser_clips, w, h, fps, tmp, log, cancel)
+        except Exception as e:
+            log("    ⚠ resumo P2 (geração) falhou (%s) — tentando drop-in." % e)
+        if not resumo:
+            resumo = _drop_seg("90_resumo", "book2", "resumo_p2", proj_stem="resumo_p2")
         if resumo:
             segmentos.append(resumo); log("    resumo P2 adicionado (%s)." % resumo.name)
         else:
-            log("    (sem resumo P2 — largue resumo_p2.mp4 na pasta do projeto, ou em materiais/%s/book2/)." % base_mat.name)
-        cta = _drop_seg("91_cta", "cta", "cta_final")
+            log("    (sem resumo P2 — sem clipes de teaser + texto no roteiro, e sem drop-in em "
+                "materiais/%s/book2/)." % base_mat.name)
+
+        cta = None
+        try:
+            cta = resumo_cta.construir_cta(proj, base_mat, modelos, teaser_clips, w, h, fps, tmp, log, cancel)
+        except Exception as e:
+            log("    ⚠ CTA (geração) falhou (%s) — tentando drop-in." % e)
+        if not cta:
+            cta = _drop_seg("91_cta", "cta", "cta_final")
         if cta:
-            segmentos.append(cta); log("    CTA final (drop-in) adicionada.")
+            segmentos.append(cta); log("    CTA final adicionada.")
         else:
-            log("    (sem CTA — materiais/%s/cta/ vazio e sem modelo cta_final)." % base_mat.name)
+            log("    (sem CTA — sem clipes de teaser + base cta_base.mp4 em materiais/%s/cta/, e "
+                "sem drop-in/modelo cta_final)." % base_mat.name)
+
+        # ÚLTIMO MINUTO (retenção pós-CTA): tela de comentários + card "Part 2" com os clipes do
+        # teaser tocando no quadrado, ~1 min. Só na isca (P1). Ver ultimo_minuto.py.
+        try:
+            import ultimo_minuto
+            um = ultimo_minuto.construir_ultimo_minuto(
+                proj, base_mat, teaser_clips, w, h, fps, tmp, log, cancel)
+            if um:
+                segmentos.append(um); log("    último minuto adicionado (%s)." % um.name)
+        except Exception as e:
+            log("    ⚠ último minuto (geração) falhou (%s) — seguindo sem." % e)
 
     # --- 4) CONCAT dos segmentos ---------------------------------------------
     segmentos = [s for s in segmentos if s and s.exists() and s.stat().st_size > 0]

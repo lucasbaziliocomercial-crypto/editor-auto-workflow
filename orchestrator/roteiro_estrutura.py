@@ -31,6 +31,12 @@ _RE_CAP = re.compile(
 )
 # Fim da Parte 1 — tudo depois disso é o gancho da P2 (não entra no vídeo da P1).
 _RE_FIM = re.compile(r"^\**\s*(END OF PART\s*\d*|FIM DA PARTE\s*\d*)\b", re.IGNORECASE)
+# Cabeçalho da Parte 2 (tolera emoji/markdown à esquerda): "🥰 PARTE 2", "PART 2", "**PARTE 2**".
+_RE_PARTE2 = re.compile(r"^\W*(?:PARTE|PART)\s*2\b", re.IGNORECASE)
+# Cabeçalho de capítulo em EN ou PT (usado só p/ delimitar o bloco do resumo).
+_RE_CAP_ANY = re.compile(r"^\**\s*(?:Chapter|Cap[íi]tulo)\s+\d+\b", re.IGNORECASE)
+# Marcador de voz de POV (1ª pessoa) que às vezes precede a prosa — não deve ser narrado.
+_RE_MARCADOR_VOZ = re.compile(r"^\s*✦")
 
 
 def _cortar_no_fim(texto):
@@ -125,11 +131,72 @@ def titulos_capas(texto):
     return out
 
 
+def _limpar_bloco(linhas):
+    """Junta as linhas de um bloco de prosa em texto narrável: descarta cabeçalhos
+    (Chapter/Capítulo/PARTE/END OF PART) e marcadores de voz (✦, [M]…[/M]) que porventura
+    caiam no bloco, colapsa linhas em branco. Devolve '' se sobrar nada."""
+    out = []
+    for ln in linhas:
+        s = ln.strip()
+        if not s:
+            if out and out[-1] != "":
+                out.append("")
+            continue
+        if (_RE_CAP_ANY.match(s) or _RE_PARTE2.match(s) or _RE_FIM.match(s)
+                or _RE_MARCADOR_VOZ.match(s)):
+            continue
+        s = re.sub(r"\[/?M\]", "", s).strip()
+        if s:
+            out.append(s)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out).strip())
+
+
+def resumo_parte2(texto):
+    """Texto do RESUMO/gancho da Parte 2 — o bloco-ponte entre P1 e P2.
+
+    Regras, na ordem:
+      1) Se houver 'END OF PART 1'/'FIM DA PARTE 1': o resumo é o que vem DEPOIS dele, até o
+         próximo cabeçalho (Chapter/Capítulo N ou PARTE 2) ou o fim. Este é o caminho OFICIAL:
+         o marcador 'END OF PART 1' é FIXO em todo roteiro e o texto após ele É o resumo da P2
+         (confirmado pela editora 2026-07-09). Como o roteiro.txt é só a Parte 1, depois do
+         marcador normalmente só existe esse bloco.
+      2) Senão, se houver um cabeçalho 'PARTE 2'/'PART 2': o resumo é o bloco de parágrafo
+         contíguo IMEDIATAMENTE ANTES desse cabeçalho (fallback defensivo p/ roteiro sem o marcador).
+      3) Senão: '' (sem resumo detectável — o chamador decide o fallback).
+    """
+    linhas = texto.replace("\r\n", "\n").split("\n")
+    idx_fim = next((i for i, l in enumerate(linhas) if _RE_FIM.match(l.strip())), None)
+    idx_p2 = next((i for i, l in enumerate(linhas) if _RE_PARTE2.match(l.strip())), None)
+
+    if idx_fim is not None:
+        fim = len(linhas)
+        for j in range(idx_fim + 1, len(linhas)):
+            s = linhas[j].strip()
+            if _RE_CAP_ANY.match(s) or _RE_PARTE2.match(s):
+                fim = j
+                break
+        return _limpar_bloco(linhas[idx_fim + 1:fim])
+
+    if idx_p2 is not None:
+        j = idx_p2 - 1
+        while j >= 0 and not linhas[j].strip():
+            j -= 1
+        fim = j + 1
+        ini = fim
+        while ini - 1 >= 0 and linhas[ini - 1].strip():
+            ini -= 1
+        return _limpar_bloco(linhas[ini:fim])
+
+    return ""
+
+
 if __name__ == "__main__":
     import sys
     from pathlib import Path
     p = Path(sys.argv[1] if len(sys.argv) > 1 else "roteiro.txt")
     est = parse_roteiro(p.read_text(encoding="utf-8", errors="replace"))
+    _r = resumo_parte2(p.read_text(encoding="utf-8", errors="replace"))
+    print("resumo_parte2: %d chars | %r" % (len(_r), _r[:120]))
     print("hook: %d chars" % len(est["hook"]))
     for c in est["chapters"]:
         print("  Cap %d — %s | %d chars | ancora: %r"
