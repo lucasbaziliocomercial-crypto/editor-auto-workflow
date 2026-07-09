@@ -350,24 +350,55 @@ def _silencio(ff, dur, out, log):
 # Blocos de vídeo (mudos) por segmento
 # ---------------------------------------------------------------------------
 
+# Presets de Ken Burns (z0,z1, fx0,fx1, fy0,fy1) — movimento CONTÍNUO por toda a duração da
+# imagem (nunca congela) + variedade por imagem. fx/fy ∈ [-1,1] = fração do espaço livre do crop
+# (0=centro, ±1=borda): x/y escalam pelo próprio (1-1/zoom), então o pan NUNCA abre borda preta,
+# em QUALQUER zoom. Substitui o micro-zoom antigo (`+0.0006`, teto 1.12) que congelava a imagem
+# após ~6,7 s e não tinha pan/variedade — ver decisoes-changelog 2026-07-09.
+_KB_MODES = (
+    (1.06, 1.18,  0.0,  0.0,  0.0,  0.0),   # zoom-in central calmo
+    (1.06, 1.20, -0.5,  0.5,  0.0,  0.0),   # zoom-in + pan esquerda -> direita
+    (1.20, 1.06,  0.5, -0.5,  0.0,  0.0),   # zoom-out + pan direita -> esquerda
+    (1.06, 1.18,  0.0,  0.0, -0.5,  0.5),   # zoom-in + pan cima -> baixo
+    (1.08, 1.20, -0.4,  0.4,  0.4, -0.4),   # zoom-in diagonal
+)
+
+
+def _kb_expr(mode, frames):
+    """Expressões zoompan (z, x, y) p/ um preset, interpoladas LINEARMENTE pelo frame de saída
+    `on` ao longo de `frames` frames (progressão 0->1). x/y ficam sempre dentro dos limites."""
+    z0, z1, fx0, fx1, fy0, fy1 = mode
+    d = max(1, frames - 1)
+    z = "%.4f+(%.4f)*on/%d" % (z0, z1 - z0, d)
+    fx = "(%.3f+(%.3f)*on/%d)" % (fx0, fx1 - fx0, d)
+    fy = "(%.3f+(%.3f)*on/%d)" % (fy0, fy1 - fy0, d)
+    # centro do crop = iw/2 - iw/zoom/2; deslocamento = fração fx do espaço livre (= o próprio centro).
+    x = "(1+%s)*(iw/2-iw/zoom/2)" % fx
+    y = "(1+%s)*(ih/2-ih/zoom/2)" % fy
+    return z, x, y
+
+
 def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log):
-    """Slideshow com Ken Burns: N imagens dividindo `dur` igualmente, zoom-in leve em cada.
-    Vídeo MUDO. Concatena via filter_complex (uma passada)."""
+    """Slideshow com Ken Burns DINÂMICO: N imagens dividindo `dur` igualmente; cada imagem faz um
+    movimento CONTÍNUO (zoom-in/-out + pan) que dura a cena inteira e varia por imagem (presets
+    _KB_MODES, ciclados por índice). Vídeo MUDO. Concatena via filter_complex (uma passada)."""
     imgs = [i for i in imgs if Path(i).exists()]
     if not imgs:
         return _tela_cor(ff, dur, w, h, fps, out, log)
     n = len(imgs)
     seg = max(0.5, dur / n)
+    frames = max(2, int(round(seg * fps)))
     inputs, filtros, labels = [], [], []
     for k, img in enumerate(imgs):
-        # -framerate fps + -t seg alimenta EXATAMENTE seg*fps frames; zoompan d=1 emite 1 frame
-        # de saída por frame de entrada (o acumulador `zoom` cresce a cada frame = zoom suave).
-        # Isso evita a pegadinha do zoompan (d=N explode a duração). Pré-escala 2x p/ não serrilhar.
+        # -framerate fps + -t seg alimenta EXATAMENTE seg*fps frames; zoompan d=1 emite 1 frame de
+        # saída por frame de entrada, e `on` (0..frames-1) dá a progressão. O movimento é função de
+        # `on` (NÃO acumulador com teto), então nunca congela. Pré-escala 2x p/ não serrilhar.
+        z, x, y = _kb_expr(_KB_MODES[k % len(_KB_MODES)], frames)
         inputs += ["-loop", "1", "-framerate", str(fps), "-t", "%.3f" % seg, "-i", str(img)]
         filtros.append(
             "[%d:v]scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,"
-            "zoompan=z='min(zoom+0.0006,1.12)':d=1:s=%dx%d:fps=%d,setsar=1[v%d]"
-            % (k, w * 2, h * 2, w * 2, h * 2, w, h, fps, k))
+            "zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=%d,setsar=1[v%d]"
+            % (k, w * 2, h * 2, w * 2, h * 2, z, x, y, w, h, fps, k))
         labels.append("[v%d]" % k)
     fc = ";".join(filtros) + ";" + "".join(labels) + "concat=n=%d:v=1:a=0[v]" % n
     cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", *inputs,
