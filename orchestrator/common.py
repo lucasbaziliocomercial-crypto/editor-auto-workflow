@@ -127,7 +127,7 @@ def materiais_canal(canal):
     O editor abastece uma vez por canal; o pipeline reaproveita em todo card. Cria a árvore
     padrão se não existir (vazia — só a estrutura, pro editor saber onde largar cada coisa)."""
     base = MATERIAIS_DIR / slugify(canal or "sem-canal", maxlen=40)
-    for sub in ("teaser", "take_p2", "book2", "cta", "padronizados", "template_capa"):
+    for sub in ("teaser", "take_p2", "book2", "cta", "padronizados", "template_capa", "qr"):
         (base / sub).mkdir(parents=True, exist_ok=True)
     return base
 
@@ -304,6 +304,47 @@ def nome_idioma(cod=None):
     return "português" if (cod or idioma()) == "pt" else "inglês"
 
 
+# ---------------------------------------------------------------------------
+# Detecção de idioma do roteiro (trava anti-narração-em-português)
+# ---------------------------------------------------------------------------
+# A esteira NÃO gera roteiro — ela baixa o Doc EN do card (s1_clickup) e o TTS narra
+# o texto LITERAL. Se um Doc em PORTUGUÊS escapar (ex.: a versão "Roteiro em português"
+# do card, ou um roteiro.txt semeado à mão), a narração sai em PT e a legenda (Whisper
+# forçado a en) vira inglês destroçado. Decisão do editor 2026-07-09: TRAVAR e exigir o
+# Doc EN (nunca traduzir automático). Estas heurísticas puras (sem dependência) detectam
+# PT com folga em texto longo, sendo conservadoras pra NÃO reprovar um roteiro EN legítimo.
+_PT_STOP = re.compile(
+    r"\b(n[aã]o|que|com|uma?|el[ea]s?|para|porque|ent[aã]o|mas|seu|sua|foi|era|tinha|"
+    r"dele|dela|voc[eê]|isso|quando|muito|tamb[eé]m|dos|das|meu|minha|nada|tudo|aquele|"
+    r"aquela|estava|ser[aá]|coisa|sobre|at[eé]|depois|ainda|sempre|nunca)\b", re.I)
+_EN_STOP = re.compile(
+    r"\b(the|and|was|were|her|his|with|that|this|they|have|had|been|would|could|she|"
+    r"he|you|your|when|what|there|their|about|which|only|just|of|to|for|from|into)\b", re.I)
+
+
+def idioma_do_texto(texto):
+    """Devolve 'pt' | 'en' | 'indefinido' pelo texto do roteiro (heurística de stopwords +
+    caracteres exclusivos do PT). Conservadora: só crava 'pt' quando o PT domina com folga,
+    pra jamais reprovar um roteiro EN legítimo (bloquear a entrega à toa é o erro caro)."""
+    if not texto or not texto.strip():
+        return "indefinido"
+    baixo = texto.lower()
+    pt = len(_PT_STOP.findall(baixo))
+    en = len(_EN_STOP.findall(baixo))
+    ptchars = sum(baixo.count(c) for c in "ãõç")   # ã/õ/ç ~ inexistentes em inglês
+    if (pt >= 5 and pt > en) or (ptchars >= 8 and pt > en):
+        return "pt"
+    if en >= 5 and en > pt:
+        return "en"
+    return "indefinido"
+
+
+def parece_portugues(texto):
+    """True se o roteiro parece estar em PORTUGUÊS (trava anti-narração-PT). Só dispara em
+    MODO INGLÊS (idioma()=='en'); no MODO TESTE (LONGFORM_IDIOMA=pt) o PT é intencional."""
+    return idioma() == "en" and idioma_do_texto(texto) == "pt"
+
+
 class ErroPipeline(Exception):
     """Erro de etapa do pipeline (mensagem amigável para a GUI/CLI)."""
     pass
@@ -415,6 +456,8 @@ class Projeto:
     def prompts_referencia(self): return self.dir / "prompts_referencia.txt" # Etapa 5 (fichas de personagem)
     @property
     def prompts_thumb(self):    return self.dir / "prompts_thumbnail.txt"  # Etapa 5
+    @property
+    def personagens_dir(self):  return self.dir / "personagens"            # Etapa 2 (fotos de personagem que a EDITORA larga na GUI, junto do teaser)
     @property
     def referencias_dir(self):  return self.dir / "referencias"            # Etapa 6 (PNG das fichas)
     @property

@@ -15,7 +15,8 @@ não há geração nem validação de roteiro. As etapas:
     6 Capas       s6_capas       -> covers/cap<c>.mp4 (Ken-Burns + título; covers.py portado)
        ── GATE 2 (opcional): conferir os drop-in de materiais/<canal>/ (teaser, book2)
     7 Montagem    s7_montagem    -> mapping.json -> out/video_mudo.mp4 -> out/final.mp4
-    8 Entrega     s8_entrega     -> entregas/<nome do card>/ + MP4 renomeado (+ anexos)
+    8 Entrega     s8_entrega     -> ENTREGAS/<card>/ (P1+P2 juntas: MP4 no topo + extras/parte-N/)
+                                    + VIDEOS-PRONTOS/<card> — Parte N.mp4 (lista plana, hardlink)
 
 CLI:  py -3 pipeline.py [alvo] [N N N ...] [--slug X] [--categoria selena|mafia]
                         [--no-gates] [--refazer]
@@ -129,6 +130,22 @@ def _garantir_projeto(slug, log):
 
 # --- Parte 2 = vídeo separado (pasta irmã) --------------------------------------------
 
+def _card_sem_p2(parent):
+    """True quando o card DEFINITIVAMENTE só tem P1: source.json presente, `n_caps_p2`==0 e sem
+    roteiro_p2.txt. Nesse caso a P2 é pulada SEM erro (não há Tab 2 a montar) — comum ao rodar
+    com "Ambas". Casos ambíguos (source.json ausente, ou n_caps_p2>0 mas o arquivo sumiu) caem
+    no erro informativo de _preparar_projeto_p2 (aí a Etapa 1 realmente precisa rodar)."""
+    if parent.existe(parent.dir / "roteiro_p2.txt"):
+        return False
+    if not parent.existe(parent.source):
+        return False
+    try:
+        src = json.loads(parent.source.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return False
+    return int(src.get("n_caps_p2", 0) or 0) == 0
+
+
 def _preparar_projeto_p2(parent, slug, log):
     """Prepara um PROJETO SEPARADO para a Parte 2 (vídeo próprio), reaproveitando o trabalho
     da P1. A P2 roda a esteira inteira numa pasta irmã `projects/<slug>-p2/` com
@@ -194,6 +211,9 @@ def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
     # Parte 2 = vídeo próprio numa pasta irmã. `proj` passa a apontar pra P2; todas as etapas
     # rodam nela sem colidir com os artefatos da P1.
     p2_mode = str(parte).lower() == "p2"
+    if p2_mode and _card_sem_p2(parent):
+        log("── Parte 2 pulada: este card só tem Parte 1 (sem Tab 2 no Doc) — nada a gerar. ✓")
+        return parent
     proj = projeto_por_slug(slug + "-p2") if p2_mode else parent
     if refazer:
         for n in sorted(etapas):

@@ -5,11 +5,13 @@ Gera dois artefatos:
 
   prompts_imagens.txt  (ÂNCORA da etapa) — N prompts por capítulo (ROTEIRO_IMAGES_PER_CHAPTER),
       na ORDEM da narração. UMA linha por imagem, no formato:
-          C<cap>|[Character N: NAME] <descrição visual da cena>
+          C<cap>|[Character 1: NAME] [Character 2: NAME] <descrição visual da cena>
       O prefixo `C<cap>|` carrega o capítulo da imagem (a Etapa 5 o remove antes de gerar; a
-      Etapa 7 o usa pra saber a que capítulo cada imagem pertence). Cada prompt começa com a(s)
-      tag(s) [Character N: NAME] presentes (nome idêntico ao do character_bible) — é assim que a
-      Etapa 5 injeta a referência do personagem e trava a aparência.
+      Etapa 7 o usa pra saber a que capítulo cada imagem pertence). TODA linha começa SEMPRE com
+      as duas tags dos DOIS PROTAGONISTAS ([Character 1] e [Character 2] — os personagens do
+      VEO/refs, nomes idênticos ao do character_bible) — é assim que a Etapa 5 anexa a referência
+      dos DOIS em cada imagem e trava a aparência deles no vídeo inteiro. O casal aparece em todo
+      frame; secundários entram só pela descrição em prosa, nunca sozinhos.
 
   prompts_capas.txt — um título por capítulo (determinístico, do roteiro): a Etapa 6 usa como
       texto da capa de cada capítulo.
@@ -89,16 +91,24 @@ CAPÍTULOS (gere EXATAMENTE %d imagens por capítulo, nesta ordem):
 FORMATO DE SAÍDA — `prompts_imagens.txt`, UMA linha por imagem, sem cabeçalho, sem numeração
 própria, na ordem C1 (as %d imagens), depois C2, etc. Cada linha:
 
-    C<cap>|[Character N: NAME] <descrição visual da cena em inglês>
+    C<cap>|[Character 1: NAME] [Character 2: NAME] <descrição visual da cena em inglês>
 
 REGRAS:
 - Comece SEMPRE cada linha com o prefixo do capítulo `C<cap>|` (ex.: C1|, C2|). É obrigatório.
-- Logo após o prefixo, as tag(s) [Character N: NAME] de QUEM aparece na cena (nome idêntico ao
-  do character_bible.txt). Se ninguém aparece (paisagem), pode omitir as tags.
+- OS DOIS PROTAGONISTAS EM TODA IMAGEM (regra dura): logo após o prefixo, TODA linha traz SEMPRE
+  as duas tags dos personagens principais — [Character 1: NAME] e [Character 2: NAME] (os mesmos
+  nomes exatos do character_bible.txt; são os dois personagens do VEO/refs). Eles são o casal que
+  conduz a história e a esteira ANEXA as fotos dos dois como referência em toda imagem, pra travar
+  a aparência deles no vídeo inteiro. NUNCA gere um frame sem os dois — nem paisagem pura, nem
+  close de um só. Se a cena é intimista de um deles, componha o outro junto (ao lado, ao fundo,
+  no reflexo, entrando no quadro, over-the-shoulder) — mas os DOIS sempre visíveis.
+- Personagens SECUNDÁRIOS (ex.: melhor amiga, braço-direito, ex) entram só pela DESCRIÇÃO em prosa,
+  SEM tag entre colchetes (eles não têm foto de referência), e NUNCA sozinhos: o casal principal
+  continua em quadro na mesma cena.
 - Descrição EM INGLÊS, concreta e cinematográfica: ambiente, ação, emoção, luz, enquadramento.
-  Vídeo VERTICAL %s — pense em enquadramento vertical (retrato, close, plano médio).
+  Vídeo VERTICAL %s — pense em enquadramento vertical (retrato, close, plano médio) que caiba os DOIS.
 - As %d imagens de um capítulo devem COBRIR a progressão daquele capítulo (começo→clímax→fim),
-  variando cenário/ação, mantendo a aparência dos personagens travada nas fichas.
+  variando cenário/ação, mantendo a aparência dos dois protagonistas travada nas fichas.
 - Romance sensual mas platform-safe: SEM nudez, SEM sexo explícito. Tensão, olhares, quase-beijos.
 - NÃO gere imagens agora (nem chame Magnific); só ESCREVA o arquivo prompts_imagens.txt.
 - Total esperado: %d linhas.
@@ -114,16 +124,21 @@ def _validar(proj, caps, n_por_cap, log):
               if l.strip()]
     por_cap = {}
     ruins = 0
+    sem_dupla = 0  # linhas que não trazem os DOIS protagonistas ([Character 1] + [Character 2])
     for l in linhas:
         m = re.match(r"\s*C(\d+)\s*\|", l)
         if not m:
             ruins += 1
             continue
         por_cap[int(m.group(1))] = por_cap.get(int(m.group(1)), 0) + 1
-    log("  prompts_imagens.txt: %d linha(s) | por capítulo: %s%s"
+        if not (re.search(r"\[Character\s*1\s*:", l) and re.search(r"\[Character\s*2\s*:", l)):
+            sem_dupla += 1
+    log("  prompts_imagens.txt: %d linha(s) | por capítulo: %s%s%s"
         % (len(linhas),
            ", ".join("C%d=%d" % (c["n"], por_cap.get(c["n"], 0)) for c in caps),
-           (" | %d linha(s) sem prefixo C<n>| (serão puladas)" % ruins) if ruins else ""))
+           (" | %d linha(s) sem prefixo C<n>| (serão puladas)" % ruins) if ruins else "",
+           (" | ⚠ %d linha(s) SEM os dois protagonistas (a Etapa 5 anexa os dois mesmo assim)"
+            % sem_dupla) if sem_dupla else ""))
     faltando = [c["n"] for c in caps if por_cap.get(c["n"], 0) == 0]
     if faltando:
         raise ErroPipeline(

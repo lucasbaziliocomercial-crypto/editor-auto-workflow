@@ -20,7 +20,7 @@ import config  # noqa: F401  (liga as env vars da esteira)
 import pipeline
 import categorias_roteiro as cats
 from common import (PROJECTS_DIR, slugify, ler_modelos, salvar_modelo,
-                    voz_do_canal)
+                    voz_do_canal, materiais_canal, IMG_EXTS)
 from stages import magnific_seam
 
 # Modelos do canal: (chave, rótulo, tipos de arquivo).
@@ -92,6 +92,7 @@ class App:
         self.cancel = None   # sinal de cancelamento da run atual (Cancel() enquanto roda)
         self.ultima_run = None   # params da última rodada (p/ o botão Continuar)
         self._teaser_pendente = None   # pasta de teaser escolhida ANTES do card (aplica ao escolher o card)
+        self._personagens_pendente = None   # fotos de personagem escolhidas ANTES do card (aplica ao escolher o card)
         root.title("Editor Auto — Edição Automática de Vídeo")
         root.configure(bg=BG)
         root.geometry("1000x900"); root.minsize(860, 640)
@@ -194,7 +195,7 @@ class App:
 
         tk.Label(ent, text="Parte:", bg=BG, fg=FG, font=F_BASE).grid(row=4, column=0, sticky="w", padx=12, pady=8)
         pf = tk.Frame(ent, bg=BG); pf.grid(row=4, column=1, sticky="w", padx=8, pady=6)
-        self.v_parte = tk.StringVar(value="p1")
+        self.v_parte = tk.StringVar(value="ambas")
         for val, txt in (("p1", "Parte 1 (isca / YouTube)"), ("p2", "Parte 2 (extensão)"), ("ambas", "Ambas")):
             ttk.Radiobutton(pf, text=txt, value=val, variable=self.v_parte).pack(side="left", padx=(4, 14))
 
@@ -229,6 +230,34 @@ class App:
                    command=self._abrir_teaser).pack(side="right", padx=(6, 0))
         ttk.Button(tf, text="Escolher pasta…", style="Big.TButton",
                    command=self._escolher_teaser).pack(side="right", padx=(6, 0))
+
+        # Personagens (referência) deste vídeo: as fotos dos personagens que a editora larga
+        # JUNTO com o teaser. Por VÍDEO (projects/<slug>/personagens/) — as mesmas fotos que o
+        # MCP do Magnific usa de referência nas imagens do corpo (Etapa 5). Prioridade sobre os
+        # anexos do card na Etapa 2.
+        pf = tk.Frame(mod, bg=BG); pf.grid(row=len(MODELOS_UI) + 1, column=0, columnspan=4, sticky="ew", padx=12, pady=(2, 2))
+        tk.Label(pf, text="Personagens (referência):", bg=BG, fg=FG, font=F_BASE).pack(side="left")
+        self.lbl_personagens = tk.Label(pf, text="—", bg=BG, fg=SUB, font=F_SUB, anchor="w")
+        self.lbl_personagens.pack(side="left", padx=8)
+        ttk.Button(pf, text="Limpar", style="Big.TButton",
+                   command=self._limpar_personagens).pack(side="right", padx=(6, 0))
+        ttk.Button(pf, text="\U0001F4C1 Abrir pasta", style="Big.TButton",
+                   command=self._abrir_personagens).pack(side="right", padx=(6, 0))
+        ttk.Button(pf, text="Escolher imagens…", style="Big.TButton",
+                   command=self._escolher_personagens).pack(side="right", padx=(6, 0))
+
+        # QR Code da ISCA (P1): imagem FIXA por canal, queimada no vídeo P1 inteiro. É por
+        # CANAL (usa a Categoria, não o card) — o editor escolhe 1x e vale pra todo vídeo do canal.
+        qf = tk.Frame(mod, bg=BG); qf.grid(row=len(MODELOS_UI) + 2, column=0, columnspan=4, sticky="ew", padx=12, pady=(2, 2))
+        tk.Label(qf, text="QR Code (só Parte 1):", bg=BG, fg=FG, font=F_BASE).pack(side="left")
+        self.lbl_qr = tk.Label(qf, text="—", bg=BG, fg=SUB, font=F_SUB, anchor="w")
+        self.lbl_qr.pack(side="left", padx=8)
+        ttk.Button(qf, text="Limpar", style="Big.TButton",
+                   command=self._limpar_qr).pack(side="right", padx=(6, 0))
+        ttk.Button(qf, text="\U0001F4C1 Abrir pasta", style="Big.TButton",
+                   command=self._abrir_qr).pack(side="right", padx=(6, 0))
+        ttk.Button(qf, text="Escolher imagem…", style="Big.TButton",
+                   command=self._escolher_qr).pack(side="right", padx=(6, 0))
 
         # ---- Modelo de imagem do Magnific (Etapa 5) — custo vs. qualidade ----
         # SÓ afeta as imagens do CORPO (Etapa 5). A capa é vídeo (Etapa 6) e não gasta crédito.
@@ -300,6 +329,8 @@ class App:
         self._atualizar_voz_ui()
         self._atualizar_modelos_ui()
         self._atualizar_teaser_ui()
+        self._atualizar_personagens_ui()
+        self._atualizar_qr_ui()
         self.root.after(300, self.carregar_cards)  # carrega os cards da 1ª categoria ao abrir
 
     # --- log via fila (thread-safe) ---
@@ -318,6 +349,7 @@ class App:
     def _on_cat(self):
         self._atualizar_voz_ui()
         self._atualizar_modelos_ui()
+        self._atualizar_qr_ui()
         self.carregar_cards()
 
     def _atualizar_voz_ui(self):
@@ -435,7 +467,10 @@ class App:
         return str(dl if dl.is_dir() else home)
 
     def _escolher_teaser(self):
+        # parent=self.root: sem isso o seletor de PASTA do Windows (SHBrowseForFolder) abre
+        # ATRÁS da janela do painel e parece que o botão "não faz nada".
         pasta = filedialog.askdirectory(
+            parent=self.root,
             title="Escolher a PASTA do teaser (ex.: o download do Vio)",
             initialdir=self._pasta_inicial_teaser(), mustexist=True)
         if not pasta:
@@ -479,6 +514,191 @@ class App:
         except Exception as e:  # noqa: BLE001
             self._log("Não consegui abrir a pasta: %s" % e)
 
+    # --- Personagens (referência) POR VÍDEO: projects/<slug>/personagens/ ---
+    def _personagens_dir(self, silencioso=False):
+        """Pasta das fotos de personagem DESTE vídeo (isolada por slug). None se sem slug."""
+        slug = self.e_slug.get().strip()
+        if not slug:
+            if not silencioso:
+                self._log("Escolha um card (define o slug) antes de mexer nos personagens.")
+            return None
+        d = PROJECTS_DIR / slug / "personagens"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @staticmethod
+    def _imgs_personagens(d):
+        if not d or not d.is_dir():
+            return []
+        return [p for p in sorted(d.iterdir()) if p.is_file() and p.suffix.lower() in IMG_EXTS]
+
+    def _atualizar_personagens_ui(self):
+        slug = self.e_slug.get().strip()
+        d = PROJECTS_DIR / slug / "personagens" if slug else None
+        if not slug:
+            if self._personagens_pendente:
+                self.lbl_personagens.config(
+                    text="%d foto(s) escolhida(s) — aplica ao escolher o card" % len(self._personagens_pendente),
+                    fg=ACC)
+            else:
+                self.lbl_personagens.config(text="escolha as fotos dos personagens (ou um card primeiro)", fg=SUB)
+            return
+        n = len(self._imgs_personagens(d))
+        if n:
+            self.lbl_personagens.config(text="%d foto(s) neste vídeo" % n, fg=FG)
+        else:
+            self.lbl_personagens.config(text="nenhuma foto — Etapa 2 cai nos anexos do card", fg=SUB)
+
+    def _copiar_personagens(self, arquivos):
+        """Copia as imagens escolhidas para a pasta de personagens DESTE vídeo.
+        Requer card definido; devolve o nº copiado (ou None se sem card)."""
+        d = self._personagens_dir()
+        if not d:
+            return None
+        import os
+        import shutil
+        n = 0
+        for a in arquivos:
+            src = Path(a)
+            if src.suffix.lower() not in IMG_EXTS:
+                self._push("  ignorei %s (não é imagem)" % src.name); continue
+            try:
+                shutil.copy2(str(src), d / src.name); n += 1
+            except Exception as e:  # noqa: BLE001
+                self._push("  não copiei %s: %s" % (src.name, e))
+        self._push("Personagens: %d foto(s) copiada(s) → %s" % (n, d))
+        self._atualizar_personagens_ui()
+        return n
+
+    def _escolher_personagens(self):
+        import os
+        home = Path(os.path.expanduser("~")); dl = home / "Downloads"
+        arquivos = filedialog.askopenfilenames(
+            parent=self.root,
+            title="Escolher as FOTOS dos personagens (as mesmas do teaser/VEO)",
+            initialdir=str(dl if dl.is_dir() else home),
+            filetypes=[("Imagem", "*.png *.webp *.jpg *.jpeg *.bmp"), ("Todos", "*.*")])
+        if not arquivos:
+            return
+        arquivos = list(arquivos)
+        # Sem card ainda? guarda a escolha e aplica quando o card for selecionado.
+        if not self.e_slug.get().strip():
+            self._personagens_pendente = arquivos
+            self._push("%d foto(s) de personagem guardada(s) — serão aplicadas ao escolher o card." % len(arquivos))
+            self._atualizar_personagens_ui()
+            return
+        self._personagens_pendente = None
+        self._copiar_personagens(arquivos)
+
+    def _aplicar_personagens_pendente(self):
+        """Chamado ao escolher um card: se havia fotos pendentes, copia agora."""
+        if self._personagens_pendente and self.e_slug.get().strip():
+            arquivos = self._personagens_pendente
+            self._personagens_pendente = None
+            self._copiar_personagens(arquivos)
+
+    def _limpar_personagens(self):
+        self._personagens_pendente = None
+        d = self._personagens_dir()
+        if not d:
+            self._atualizar_personagens_ui(); return
+        for p in self._imgs_personagens(d):
+            try:
+                p.unlink()
+            except Exception as e:  # noqa: BLE001
+                self._push("  não apaguei %s: %s" % (p.name, e))
+        self._push("Personagens deste vídeo esvaziados.")
+        self._atualizar_personagens_ui()
+
+    def _abrir_personagens(self):
+        import os
+        d = self._personagens_dir()
+        if not d:
+            return
+        try:
+            os.startfile(str(d))  # noqa: S606
+        except Exception as e:  # noqa: BLE001
+            self._log("Não consegui abrir a pasta: %s" % e)
+
+    # --- QR Code da ISCA (P1): imagem FIXA por canal em materiais/<canal>/qr/ ---
+    def _qr_dir(self, silencioso=False):
+        """Pasta do QR do canal da categoria selecionada. None se não houver categoria."""
+        cat = self.cb_cat.get().strip()
+        if not cat:
+            if not silencioso:
+                self._log("Escolha a categoria antes de mexer no QR.")
+            return None
+        return materiais_canal(cats.canal_de(cat)) / "qr"
+
+    @staticmethod
+    def _qr_imgs(d):
+        if not d or not d.is_dir():
+            return []
+        return [p for p in sorted(d.iterdir()) if p.is_file() and p.suffix.lower() in IMG_EXTS]
+
+    def _atualizar_qr_ui(self):
+        d = self._qr_dir(silencioso=True)
+        imgs = self._qr_imgs(d)
+        if imgs:
+            self.lbl_qr.config(text=imgs[0].name if len(imgs) == 1
+                               else "%s (+%d)" % (imgs[0].name, len(imgs) - 1), fg=FG)
+        else:
+            self.lbl_qr.config(text="nenhum QR neste canal — escolha a imagem (PNG enquadrado)", fg=SUB)
+
+    def _escolher_qr(self):
+        d = self._qr_dir()
+        if not d:
+            return
+        import os
+        import shutil
+        home = Path(os.path.expanduser("~")); dl = home / "Downloads"
+        caminho = filedialog.askopenfilename(
+            title="Escolher a imagem do QR (PNG/webp já enquadrado, fundo transparente)",
+            initialdir=str(dl if dl.is_dir() else home),
+            filetypes=[("Imagem", "*.png *.webp *.jpg *.jpeg"), ("Todos", "*.*")])
+        if not caminho:
+            return
+        src = Path(caminho)
+        if src.suffix.lower() not in IMG_EXTS:
+            self._push("Isso não é uma imagem (%s). Use PNG/webp." % src.suffix); return
+        d.mkdir(parents=True, exist_ok=True)
+        # QR é ÚNICO por canal: remove os anteriores antes de copiar o novo.
+        for antigo in self._qr_imgs(d):
+            try:
+                antigo.unlink()
+            except Exception as e:  # noqa: BLE001
+                self._push("  não apaguei o QR antigo %s: %s" % (antigo.name, e))
+        try:
+            shutil.copy2(str(src), d / ("qr" + src.suffix.lower()))
+        except Exception as e:  # noqa: BLE001
+            self._push("Não copiei o QR: %s" % e); return
+        self._push("QR do canal '%s' definido: %s (vale em toda Parte 1 deste canal)."
+                   % (cats.canal_de(self.cb_cat.get().strip()), src.name))
+        self._atualizar_qr_ui()
+
+    def _limpar_qr(self):
+        d = self._qr_dir()
+        if not d:
+            return
+        for p in self._qr_imgs(d):
+            try:
+                p.unlink()
+            except Exception as e:  # noqa: BLE001
+                self._push("  não apaguei %s: %s" % (p.name, e))
+        self._push("QR do canal removido.")
+        self._atualizar_qr_ui()
+
+    def _abrir_qr(self):
+        import os
+        d = self._qr_dir()
+        if not d:
+            return
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            os.startfile(str(d))  # noqa: S606
+        except Exception as e:  # noqa: BLE001
+            self._log("Não consegui abrir a pasta: %s" % e)
+
     # --- carregar cards da categoria (thread) ---
     def carregar_cards(self):
         cat = self.cb_cat.get().strip()
@@ -510,6 +730,8 @@ class App:
         self.e_slug.delete(0, "end"); self.e_slug.insert(0, slugify(nome))
         self._aplicar_teaser_pendente()
         self._atualizar_teaser_ui()
+        self._aplicar_personagens_pendente()
+        self._atualizar_personagens_ui()
 
     def abrir_pasta(self):
         import os

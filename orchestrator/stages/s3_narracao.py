@@ -29,7 +29,7 @@ from pathlib import Path
 
 import common
 from common import (ErroPipeline, WHISPER_SCRIPT, achar_audio, achar_ffmpeg,
-                    SUBPROCESS_FLAGS, idioma, nome_idioma)
+                    SUBPROCESS_FLAGS, idioma, nome_idioma, parece_portugues)
 from runner import rodar_script
 import roteiro_estrutura
 
@@ -60,6 +60,17 @@ def preparar_texto(proj, log):
         texto = roteiro_estrutura.texto_narracao(bruto)
     if not texto.strip():
         raise ErroPipeline("roteiro.txt não produziu texto de narração (vazio após limpeza).")
+
+    # Trava de idioma (última linha de defesa antes de gastar TTS): se o roteiro estiver em
+    # PORTUGUÊS, a narração sairia em PT (voz do canal lendo o texto literal). Bloqueia aqui
+    # — pega roteiro.txt semeado à mão que burlou a Etapa 1. Só no modo inglês; no modo teste
+    # (LONGFORM_IDIOMA=pt) o PT é intencional. Decisão do editor 2026-07-09.
+    if parece_portugues(texto):
+        raise ErroPipeline(
+            "O texto de narração (roteiro.txt) está em PORTUGUÊS — a narração sairia em PT e a "
+            "legenda em inglês destroçado. Substitua projects/%s/roteiro.txt pela versão em "
+            "INGLÊS (rode a Etapa 1 apontando o Doc EN do card, ou cole o roteiro EN). Só pra "
+            "teste em PT: LONGFORM_IDIOMA=pt." % proj.dir.name)
 
     proj.roteiro_tts.write_text(texto, encoding="utf-8")
     if segmentos:
@@ -404,6 +415,82 @@ def otimizar_pausas(proj, log):
 
 
 # ---------------------------------------------------------------------------
+# Narração das TROCAS DE CAPÍTULO (mini-TTS por título)
+# ---------------------------------------------------------------------------
+# No Romance Maker a narradora DITAVA "Chapter N — Título" no início de cada capítulo e a
+# capa (troca) ficava na tela exatamente pelo tempo dessa fala. Isso se perdeu na portagem
+# (o texto_narracao remove os cabeçalhos). Aqui geramos um mini-áudio POR capítulo —
+# "Chapter N. <Título>." na voz feminina do canal — gravado em covers/titulo_NN.mp3. A
+# Etapa 6 usa a duração dele como a duração da capa; a Etapa 7 toca ele por baixo da capa.
+# Desacoplado do narration.mp3 do corpo → a sincronia sai por construção (não depende de
+# Whisper). Desliga com ROTEIRO_COVER_NARRAR_TITULO=0 (capa volta a ser muda/duração fixa).
+
+def _cover_narrar_on():
+    v = os.environ.get("ROTEIRO_COVER_NARRAR_TITULO", "1").strip().lower()
+    return v not in ("0", "off", "nao", "não", "no", "false")
+
+
+def _texto_titulo(n, titulo):
+    """Texto que a narradora fala na troca: 'Chapter N. <Título>.' (ponto = pausa dramática).
+    Sem título (fallback 'Chapter N') → só 'Chapter N.'. Remove prefixo 'Chapter N' duplicado
+    caso o título já venha rotulado."""
+    t = re.sub(r"^\**\s*chapter\s+\d+\s*[—:\-]?\s*", "", (titulo or "").strip(),
+               flags=re.IGNORECASE).strip()
+    return ("Chapter %d. %s." % (n, t)) if t else ("Chapter %d." % n)
+
+
+def sintetizar_titulos(proj, log, cancel=None):
+    """Sintetiza covers/titulo_NN.mp3 ('Chapter N. Título.') por capítulo na voz do canal e
+    grava a duração de cada um em capitulos.json (campo 'titulo_dur', em s). Idempotente
+    (âncora = o mp3). TTS curtíssimo → sem o backoff longo do synthesize: se a cadeia toda
+    estiver em rate-limit, aquele título fica sem áudio e a capa cai no silêncio (gracioso)."""
+    cap_json = proj.dir / "capitulos.json"
+    if not proj.existe(cap_json):
+        return
+    if not _cover_narrar_on():
+        log("    narração das trocas de capítulo desligada (ROTEIRO_COVER_NARRAR_TITULO=0).")
+        return
+    try:
+        dados = json.loads(cap_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    caps = dados.get("capitulos", [])
+    if not caps:
+        return
+
+    from capcut_tts import garantir_sidecar
+    ff = achar_ffmpeg()
+    proj.covers_dir.mkdir(parents=True, exist_ok=True)
+    base = garantir_sidecar(log=log)
+    voz = _voz_primaria(proj, log)
+    cadeia = _voice_chain(voz, log)
+    cooldown_limite = int(os.environ.get("LONGFORM_TTS_VOICE_COOLDOWN", "3"))
+    queimadas, falhas = set(), {v: 0 for v in cadeia}
+
+    log("▶ Etapa 3 — narração das trocas de capítulo (%d título[s], voz=%s)..." % (len(caps), voz))
+    for c in caps:
+        if cancel is not None and cancel.is_set():
+            raise ErroPipeline("Cancelado pelo usuário.")
+        n = c.get("n")
+        mp3 = proj.covers_dir / ("titulo_%02d.mp3" % n)
+        if proj.existe(mp3):
+            c["titulo_dur"] = round(_duracao(ff, mp3), 3)
+            continue
+        texto = _texto_titulo(n, c.get("titulo", ""))
+        voz_ok = _tentar_cadeia(texto, cadeia, mp3, base, n, len(caps),
+                                queimadas, falhas, cooldown_limite, log)
+        if voz_ok is None or not proj.existe(mp3):
+            log("    ⚠ capítulo %d: título não sintetizado (rate-limit) — capa fica muda." % n)
+            c.pop("titulo_dur", None)
+            continue
+        c["titulo_dur"] = round(_duracao(ff, mp3), 3)
+        log("    ✓ titulo_%02d.mp3 — \"%s\" (%.1fs)." % (n, texto[:44], c["titulo_dur"]))
+
+    dados["capitulos"] = caps
+    cap_json.write_text(json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # run()
 # ---------------------------------------------------------------------------
 
@@ -419,20 +506,23 @@ def run(proj, log, cancel=None, **_):
 
     if proj.existe(proj.narration_srt):
         log("    narration.srt já existe — Whisper pulado.")
-        return
-    if not WHISPER_SCRIPT.is_file():
-        raise ErroPipeline(
-            "Script de Whisper não encontrado em %s. Ajuste a env TINAGO_DIR." % WHISPER_SCRIPT)
-    audio = achar_audio(proj.dir)
-    os.environ["WHISPER_LANG"] = idioma()
-    log("▶ Etapa 3 — SRT (Whisper, idioma=%s) a partir de %s..." % (nome_idioma(), audio.name))
-    rodar_script([WHISPER_SCRIPT, audio], proj.dir, log, cancel)
-    gerado = audio.with_suffix(".srt")
-    if gerado.exists() and gerado != proj.narration_srt:
-        shutil.copyfile(gerado, proj.narration_srt)
-    if not proj.existe(proj.narration_srt):
-        raise ErroPipeline("Whisper não gerou narration.srt.")
-    log("    ✓ narration.srt pronto (timestamps reais da narração).")
+    else:
+        if not WHISPER_SCRIPT.is_file():
+            raise ErroPipeline(
+                "Script de Whisper não encontrado em %s. Ajuste a env TINAGO_DIR." % WHISPER_SCRIPT)
+        audio = achar_audio(proj.dir)
+        os.environ["WHISPER_LANG"] = idioma()
+        log("▶ Etapa 3 — SRT (Whisper, idioma=%s) a partir de %s..." % (nome_idioma(), audio.name))
+        rodar_script([WHISPER_SCRIPT, audio], proj.dir, log, cancel)
+        gerado = audio.with_suffix(".srt")
+        if gerado.exists() and gerado != proj.narration_srt:
+            shutil.copyfile(gerado, proj.narration_srt)
+        if not proj.existe(proj.narration_srt):
+            raise ErroPipeline("Whisper não gerou narration.srt.")
+        log("    ✓ narration.srt pronto (timestamps reais da narração).")
+
+    # Narração das trocas de capítulo (mini-TTS por título) — alimenta a capa (Etapas 6 e 7).
+    sintetizar_titulos(proj, log, cancel)
 
 
 # --- teste standalone: py -3 stages/s3_narracao.py <slug> -----------------------------

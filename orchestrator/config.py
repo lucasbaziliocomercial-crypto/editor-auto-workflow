@@ -132,9 +132,36 @@ DEFAULTS = {
     "ROTEIRO_TEASER_MAX_S": "60",         # teaser drop-in no início (≤60s)
     "ROTEIRO_PAUSA_TROCA_S": "0.5",       # pausa no início e nas trocas de capítulo
     # Render da montagem (Etapa 7) — specs portadas da esteira-modelo (long-form).
-    "ROTEIRO_ENCODER": "libx264",         # encoder de vídeo (h264_nvenc p/ GPU)
+    # ENCODER: 'auto' (default) detecta o melhor de HARDWARE que a máquina realmente suporta,
+    # via smoke-test cacheado (montagem_vertical._encoder): nvenc (NVIDIA) → qsv (Intel Quick
+    # Sync) → amf (AMD) → libx264 (CPU). Assim CADA máquina do time usa a aceleração dela sem
+    # config manual (PC RTX 2060 → nvenc; notebook Intel → qsv; notebook AMD → amf). Um valor
+    # explícito (ex.: 'h264_nvenc', 'libx264') é respeitado sem detectar.
+    "ROTEIRO_ENCODER": "auto",            # auto = nvenc/qsv/amf/libx264 conforme a máquina
     "ROTEIRO_CRF": "18",                  # qualidade libx264 (18 = transparente)
     "ROTEIRO_X264_PRESET": "fast",
+    "ROTEIRO_NVENC_PRESET": "p4",         # preset NVENC p1(+rápido)..p7(+qualidade); p4≈p5 visual
+    "ROTEIRO_NVENC_CQ": "21",             # qualidade NVENC (menor=melhor; 21 ≈ CRF 18)
+    "ROTEIRO_QSV_PRESET": "veryfast",     # preset Intel QSV (veryfast..veryslow)
+    "ROTEIRO_QSV_GQ": "23",               # qualidade QSV ICQ (menor=melhor; ~= CRF 18-20)
+    "ROTEIRO_AMF_QUALITY": "balanced",    # AMD AMF: speed|balanced|quality
+    "ROTEIRO_AMF_QP": "22",               # AMD AMF qp constante (menor=melhor)
+    # Super-amostragem do Ken Burns: canvas que o zoompan lê antes do zoom. NÃO é só anti-serrilhado
+    # — é o ANTI-TREMIDO nº1: o zoompan arredonda o pan/zoom p/ pixel INTEIRO desse canvas, então o
+    # "pulo" residual em px de saída = 1/supersample (1.0→~1px = TREMIDO visível; 2.0→0,5px = liso).
+    # A 1.0 (o valor antigo, escolhido só pensando em nitidez) a câmera "segura e pula" = a tremedeira
+    # que a editora reclamou. 2.0 + o tmix (ROTEIRO_MOTIONBLUR, ligado por padrão no código) fica TÃO
+    # liso quanto 4x a ~metade do custo (medição da esteira long-form). Em notebook 8GB muito lento,
+    # cai p/ 1.5 (o tmix segura o resto) — NÃO volte p/ 1.0 (reintroduz o tremido). Custo: é o maior
+    # peso de CPU do corpo (canvas maior). Ver decisoes-changelog 2026-07-09 (port do Ken Burns long-form).
+    "ROTEIRO_KB_SUPERSAMPLE": "2.0",
+    # Amplitude do Ken Burns (env-tunável; defaults espelham a long-form — a editora pediu p/ SENTIR
+    # o movimento). ROTEIRO_KENBURNS_ZOOM = 1.0→1.0+z (zoom); ROTEIRO_KENBURNS_PAN = fração da margem
+    # livre usada no pan (0.90 = quase até a borda, sem abrir preto). ROTEIRO_MOTIONBLUR: frames de
+    # motion-blur (tmix) que fundem o judder — sem valor aqui, o código usa 3 em ≤30fps / 2 acima
+    # (0/1 desliga). ROTEIRO_KB_FADE: fade-preto entre imagens do corpo (0=off; 12 = look long-form).
+    "ROTEIRO_KENBURNS_ZOOM": "0.28",
+    "ROTEIRO_KENBURNS_PAN": "0.90",
     "ROTEIRO_AUDIO_NIVEL": "media",       # limpeza da narração: leve|media|forte|off
     "ROTEIRO_AUDIO_LUFS": "-14",          # loudnorm alvo (padrão da casa)
     "ROTEIRO_AUDIO_TP": "-1.5",           # true peak

@@ -1,0 +1,35 @@
+{
+  "hook_chars": 0,
+  "capitulos": [
+    {
+      "n": 1,
+      "titulo": "The Voice Inside the Vault",
+      "primeira_frase": "The first thing I noticed that morning was the silence."
+    },
+    {
+      "n": 2,
+      "titulo": "Informant's Daughter",
+      "primeira_frase": "The penthouse had a view of the lake and good silence."
+    },
+    {
+      "n": 3,
+      "titulo": "The Truth the Old Malvani Took With Him",
+      "primeira_frase": "The doorbell buzzed again, and the sound pushed me toward the door"
+    },
+    {
+      "n": 4,
+      "titulo": "The Decision I Didn't Ask to Make",
+      "primeira_frase": "The cemetery that Monday morning was nearly empty."
+    },
+    {
+      "n": 5,
+      "titulo": "The Night That Ended Without Blood (Again)",
+      "primeira_frase": "The hotel's smaller ballroom was half the size of the main ballroom"
+    },
+    {
+      "n": 6,
+      "titulo": "House on the Lake",
+      "primeira_frase": "The balcony had the same stones as the floor."
+    }
+  ]
+}

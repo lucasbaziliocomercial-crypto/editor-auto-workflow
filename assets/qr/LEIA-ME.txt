@@ -1,0 +1,37 @@
+QR CODE DA ISCA (Parte 1)
+=========================
+
+O que é
+-------
+Todo vídeo PARTE 1 (isca) sai com um QR Code queimado por cima do vídeo INTEIRO.
+É um asset FIXO: você larga o arquivo uma vez e a montagem aplica sozinha em toda P1.
+A PARTE 2 NÃO leva QR.
+
+O QR deve ser uma IMAGEM JÁ ENQUADRADA no frame ("na posição certinha"):
+- PNG (ou webp) do tamanho do vídeo daquele canal, com FUNDO TRANSPARENTE,
+  e o QR já desenhado na posição/tamanho que você quer.
+  (Lena/Rowan/Kay = 1920x1080 horizontal; canais verticais = 1080x1920.)
+- A montagem escala essa imagem pro frame e sobrepõe. Como o resto é transparente,
+  só o QR aparece, exatamente onde você desenhou.
+
+Onde largar (a montagem procura NESTA ordem — o 1º que existir vence):
+  1. projects/<slug>/qr/           -> QR só daquele vídeo específico (override pontual)
+  2. materiais/<canal>/qr/         -> QR do canal (o normal: um por canal)
+     (Rowan e Kay herdam o da Lena se não tiverem o próprio)
+  3. assets/qr/                    -> este aqui: QR global padrão (fallback, opcional)
+
+Ou seja: o lugar do dia a dia é  materiais/<canal>/qr/  (uma imagem por canal).
+Deixe UMA imagem por pasta. Se houver mais de uma, a montagem prefere os nomes:
+qr, qr_code, qrcode, qr_p1, link — senão pega a primeira em ordem alfabética.
+
+Ajustes (opcionais, no editor-auto.env)
+---------------------------------------
+ROTEIRO_QR=0            desliga o QR em toda a esteira.
+ROTEIRO_QR_FIT=1        (padrão) escala o QR pro frame inteiro e sobrepõe em 0:0 —
+                        é o caso do PNG full-frame já enquadrado. Com FIT=0 o QR
+                        entra no tamanho nativo, posicionado por ROTEIRO_QR_POS.
+ROTEIRO_QR_POS=0:0      posição x:y quando FIT=0. Aceita expressões do ffmpeg overlay,
+                        ex.: W-w-40:H-h-40  = canto inferior direito com 40px de margem.
+ROTEIRO_QR_OPACITY=1.0  opacidade do QR (0..1).
+
+Se não houver nenhum QR em lugar nenhum, a montagem só avisa e segue sem QR.

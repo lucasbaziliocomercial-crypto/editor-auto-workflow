@@ -9,7 +9,8 @@ O que faz (Python puro, sem MCP — via REST do ClickUp + export do Google Docs)
   2. Lê os COMENTÁRIOS e acha o link do Google Doc do ROTEIRO EN — ignorando os comentários
      rotulados "Roteiro em português" (versão de teste PT) e "PREMISSA:".
   3. Baixa o Doc em texto (endpoint /export?format=txt — funciona com o link compartilhado)
-     e separa por abas: `Tab 1` = P1 (isca/YouTube), `Tab 2` = P2 (extensão/plataforma).
+     e separa por abas (guias): `Tab 1`/`… Part 1` = P1 (isca/YouTube),
+     `Tab 2`/`… Part 2` = P2 (extensão/plataforma).
   4. Grava roteiro.txt (P1 = Tab 1) e roteiro_p2.txt (Tab 2), preservando os títulos de
      capítulo (linhas "Chapter N — Título") p/ a Etapa 4 gerar as capas. Grava source.json.
 
@@ -24,10 +25,15 @@ import urllib.request
 import urllib.error
 
 import clickup_api
-from common import ErroPipeline, slugify
+from common import ErroPipeline, slugify, parece_portugues
 
 _DOC_ID = re.compile(r"docs\.google\.com/document/d/([A-Za-z0-9_-]{20,})")
-_TAB = re.compile(r"^﻿?\s*Tab\s+(\d+)\s*$", re.IGNORECASE)
+# Marcador de aba (guia) do Doc EN. Duas convenções FIXAS que os Docs sempre usam
+# (decisão do editor 2026-07-09) — o número (1, 2, …) mapeia direto pra P1/P2/…:
+#   "Tab 1"  / "Tab 2"                 (nome curto padrão da guia)
+#   "<nome…> Part 1" / "Part 2"        (o título da guia termina em 'Part N')
+# Sempre casa a LINHA INTEIRA (o título da guia é uma linha isolada no export .txt).
+_TAB = re.compile(r"^﻿?\s*(?:Tab\s+(\d+)|.*?\bPart\s+(\d+))\s*$", re.IGNORECASE)
 # Rótulos que NÃO são o roteiro EN (versão PT de teste / premissa).
 _RE_IGNORAR = re.compile(r"portugu[eê]s|premissa", re.IGNORECASE)
 
@@ -109,6 +115,14 @@ def _achar_doc_roteiro(card_id, log):
     for rotulo_pt, did, amostra in candidatos:
         tag = " (rotulado PT/premissa — evitado)" if rotulo_pt else ""
         log("  candidato Doc: %s%s %s" % (did[:12], tag, ("| " + amostra) if amostra else ""))
+    # Se o MELHOR candidato ainda é PT/premissa, é porque o card NÃO tem o Doc do roteiro EN
+    # (sem rótulo) — só o "Roteiro em português" e/ou a "PREMISSA". Avisa ALTO aqui; a trava de
+    # idioma em run() vai barrar depois de baixar. (Ação: colar o Doc EN nos comentários do card,
+    # como nos cards que saem certos, ou forçar ROTEIRO_DOC_URL=<link EN>.)
+    if candidatos[0][0]:
+        log("  ⚠ NENHUM Doc do roteiro EM INGLÊS (sem rótulo) nos comentários — só achei "
+            "'Roteiro em português'/'Premissa'. O vídeo oficial é em inglês: cole o Doc do "
+            "roteiro EN no card (ou use ROTEIRO_DOC_URL). Vou barrar a narração em PT.")
     return candidatos[0][1]
 
 
@@ -134,7 +148,8 @@ def _baixar_doc_txt(doc_id, log):
 
 
 def _separar_abas(txt):
-    """Divide o texto do Doc pelas linhas 'Tab N' -> {1: texto_p1, 2: texto_p2, ...}.
+    """Divide o texto do Doc pelas linhas de guia ('Tab N' ou '… Part N')
+    -> {1: texto_p1, 2: texto_p2, ...}.
 
     Se não houver marcador de aba, tudo vira a aba 1 (P1)."""
     linhas = txt.replace("\r\n", "\n").split("\n")
@@ -146,7 +161,7 @@ def _separar_abas(txt):
         if m:
             if atual is not None:
                 abas[atual] = "\n".join(buf).strip()
-            atual = int(m.group(1))
+            atual = int(m.group(1) or m.group(2))  # 'Tab N' -> g1, '… Part N' -> g2
             buf = []
         else:
             if atual is None:
@@ -190,7 +205,7 @@ def run(proj, log, cancel=None, *, card_id=None, categoria=None, **_):
     abas = _separar_abas(txt)
     if 1 not in abas or len(abas[1].strip()) < 500:
         raise ErroPipeline(
-            "O Doc não tem conteúdo de P1 (aba 'Tab 1') utilizável. Abas achadas: %s"
+            "O Doc não tem conteúdo de P1 (aba 'Tab 1'/'Part 1') utilizável. Abas achadas: %s"
             % sorted(abas))
 
     roteiro_p1 = abas[1].strip()
@@ -205,6 +220,21 @@ def run(proj, log, cancel=None, *, card_id=None, categoria=None, **_):
             "Provavelmente é a versão em PORTUGUÊS (ou premissa), não o roteiro EN. "
             "Confira o link do roteiro EN nos comentários do card e, se preciso, force com "
             "a env ROTEIRO_DOC_URL=<link do Doc EN> antes de rodar a Etapa 1." % doc_id)
+    # Trava de idioma: mesmo COM cabeçalhos "Chapter N —", o miolo pode estar em português
+    # (Doc PT que manteve os títulos em inglês). Narração PT + legenda EN destroçada é o
+    # pior dos mundos — TRAVA aqui e exige o Doc EN (decisão do editor 2026-07-09). Só vale
+    # no modo inglês; no modo teste (LONGFORM_IDIOMA=pt) o PT é intencional e passa.
+    if parece_portugues(roteiro_p1):
+        raise ErroPipeline(
+            "O Doc %s (Tab 1) está em PORTUGUÊS — a esteira produz vídeo em inglês, então a "
+            "narração sairia em PT com legenda EN destroçada. Aponte o COMENTÁRIO do roteiro "
+            "EN no card (evite os rotulados 'Roteiro em português'/'Premissa') ou force com a "
+            "env ROTEIRO_DOC_URL=<link do Doc EN>. (Só pra teste em PT: LONGFORM_IDIOMA=pt.)"
+            % doc_id)
+    if roteiro_p2 and parece_portugues(roteiro_p2):
+        raise ErroPipeline(
+            "O Doc %s tem a Tab 2 (Parte 2) em PORTUGUÊS. O vídeo da P2 sairia narrado em PT. "
+            "Corrija a Tab 2 do Doc EN (ou aponte o Doc EN certo) antes de rodar." % doc_id)
     proj.roteiro.write_text(roteiro_p1, encoding="utf-8")
     log("  P1 (Tab 1): %d caps, %d palavras -> %s"
         % (_contar_caps(roteiro_p1), len(roteiro_p1.split()), proj.roteiro.name))

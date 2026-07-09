@@ -1,0 +1,26 @@
+CONFIGS DE RENDER POR MAQUINA (time de edicao)
+==============================================
+
+Cada maquina usa um encoder de video diferente (a GPU que ela tem). Aqui ficam SALVAS as
+configs de render de cada notebook do editor, prontas pra colar. NENHUMA delas esta ativa na
+maquina do dono (o PC com RTX 2060 fixa o nvenc no proprio editor-auto.env).
+
+  notebook-intel-i5-13420h.env   -> Intel Quick Sync  (h264_qsv)
+  notebook-amd-ryzen5-5500u.env  -> AMD AMF            (h264_amf)
+
+COMO USAR num notebook:
+  1. Monta o editor-auto.env desse notebook a partir do editor-auto.env.example (com o token
+     do ClickUp do time).
+  2. Substitui a secao "Etapa 7 — Render" pelo conteudo do arquivo desta pasta que corresponde
+     a maquina.
+  3. Fecha e reabre o painel editor-auto (o config.py so le o .env no boot).
+  4. Confere no log da montagem: "encoder de video: h264_qsv" (Intel) ou "h264_amf" (AMD).
+
+OBS.: nem precisaria colar nada — o config.py tem default ROTEIRO_ENCODER=auto, que detecta
+sozinho o encoder de cada maquina (nvenc>qsv>amf>libx264) via smoke-test. Estes arquivos sao
+pra FIXAR/DEIXAR EXPLICITO por maquina (mais deterministico e mais rapido no boot, sem o
+smoke-test). Se o encoder explicito falhar numa maquina, a montagem NAO cai sozinha no auto —
+ai troca por ROTEIRO_ENCODER=auto nesse notebook (ou libx264 pra forcar CPU).
+
+Os ajustes de QUALIDADE do Ken Burns (ROTEIRO_KB_SUPERSAMPLE=2.0 anti-tremido, motion blur,
+zoom/pan) sao iguais em todas as maquinas e vem dos defaults do config.py — nao repita aqui.

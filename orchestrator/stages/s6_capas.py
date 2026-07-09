@@ -96,6 +96,40 @@ def _canal(proj):
     return ""
 
 
+def _envf(k, d):
+    try:
+        return float(os.environ.get(k, d))
+    except (TypeError, ValueError):
+        return float(d)
+
+
+def _cover_narrar_on():
+    v = os.environ.get("ROTEIRO_COVER_NARRAR_TITULO", "1").strip().lower()
+    return v not in ("0", "off", "nao", "não", "no", "false")
+
+
+def _titulo_durs(proj):
+    """{n: dur_s} das narrações de título (capitulos.json 'titulo_dur', gravado pela Etapa 3).
+    Vazio se ausente/desligado. A duração da capa do capítulo N passa a ser essa fala +
+    respiro (com piso/teto), pra a capa durar exatamente o tempo do 'Chapter N — Título'."""
+    p = proj.dir / "capitulos.json"
+    if not proj.existe(p):
+        return {}
+    try:
+        caps = json.loads(p.read_text(encoding="utf-8")).get("capitulos", [])
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for c in caps:
+        d = c.get("titulo_dur")
+        if isinstance(d, (int, float)) and d > 0:
+            try:
+                out[int(c.get("n"))] = float(d)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
 def _ref_duracao_fps(ref):
     """(duração_s, fps) do vídeo de referência da troca de capítulo, via ffprobe. Assim a capa
     gerada sai com o MESMO comprimento/cadência da referência. (None, None) se não der."""
@@ -178,8 +212,19 @@ def run(proj, log, cancel=None, **_):
 
     imgs_cap = _primeira_imagem_por_cap(proj, len(titulos))
 
-    log("▶ Etapa 6 — capas de capítulo (%d, %dx%d, %.1fs, zoom %.2f, fonte %s)..."
-        % (len(titulos), cfg["width"], cfg["height"], cfg["duration_s"], cfg["zoom"],
+    # Duração da capa = tempo da fala "Chapter N — Título" (Etapa 3) + respiro, entre um piso
+    # e um teto (título curto não fica instantâneo; título longo não estica demais). Sem a
+    # narração do título (desligada / TTS falhou), a capa mantém a duração da referência.
+    narrar = _cover_narrar_on()
+    durs = _titulo_durs(proj) if narrar else {}
+    respiro = _envf("ROTEIRO_COVER_RESPIRO_S", 0.5)
+    dmin = _envf("ROTEIRO_COVER_DUR_MIN", 2.5)
+    dmax = _envf("ROTEIRO_COVER_DUR_MAX", 8.0)
+
+    log("▶ Etapa 6 — capas de capítulo (%d, %dx%d, %s, zoom %.2f, fonte %s)..."
+        % (len(titulos), cfg["width"], cfg["height"],
+           ("sincronizadas à narração do título" if durs else "%.1fs" % cfg["duration_s"]),
+           cfg["zoom"],
            os.path.basename(cfg["font_path"]) if cfg["font_path"] else "The Seasons (embutida)"))
 
     gerados = 0
@@ -192,9 +237,15 @@ def run(proj, log, cancel=None, **_):
             continue
         bg = str(imgs_cap.get(i)) if imgs_cap.get(i) else None
         texto = _titulo_capa(i, titulo)
-        covers.generate_cover_video(texto, cfg, out, bg_image=bg)
+        cfg_i = cfg
+        sync = ""
+        if durs.get(i):
+            dur_capa = max(dmin, min(dmax, durs[i] + respiro))
+            cfg_i = dict(cfg, duration_s=round(dur_capa, 2))
+            sync = ", %.1fs sync fala" % dur_capa
+        covers.generate_cover_video(texto, cfg_i, out, bg_image=bg)
         origem = ("img do cap" if bg else "cor sólida")
-        log("    ✓ capa_%02d.mp4 — \"%s\" (fundo: %s)." % (i, texto[:48], origem))
+        log("    ✓ capa_%02d.mp4 — \"%s\" (fundo: %s%s)." % (i, texto[:48], origem, sync))
         gerados += 1
 
     n = len(list(proj.covers_dir.glob("capa_*.mp4")))

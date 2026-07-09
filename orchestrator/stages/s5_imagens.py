@@ -10,6 +10,12 @@ REFERÊNCIA DE PERSONAGEM = decisão da equipe: usar as fotos de referencias/ DI
 Heloyse. O character_bible.txt mapeia cada [Character N: NAME] à sua foto ("Ref image:
 referencias/<arquivo>"), e a instrução manda anexar essa foto ao gerar cada cena.
 
+OS DOIS PROTAGONISTAS EM TODA IMAGEM (2026-07-09): as fotos dos DOIS personagens principais
+([Character 1] + [Character 2] — os do VEO) vão como referência em TODA imagem, sempre — mesmo
+que a linha do prompt cite só um deles. É assim que a aparência dos dois fica idêntica às fotos
+do VEO no vídeo inteiro (o casal conduz a história e recorre em todos os frames). Refs deduplicadas
+por identifier (se os dois compartilham a mesma foto, anexa uma vez só).
+
 Trava de crédito: a geração em lote fica bloqueada até LONGFORM_MAGNIFIC_CORPO_OK=1
 (mesma trava do long-form — evita queimar crédito sem querer).
 
@@ -77,13 +83,19 @@ def _instrucao(proj, total, faltam, aspect):
         "   (b) `Bash curl -X PUT -H \"Content-Type: image/png\" --data-binary @referencias/<arq> "
         "\"<uploadUrl>\"`;\n"
         "   (c) mcp__magnific__creations_finalize_upload {identifier:<o do passo a>}.\n"
-        "2) Para CADA prompt, detecte as tags [Character N: NAME] presentes, ache no character_bible.txt "
-        "a foto de cada um, e monte references=[{type:\"character\", identifier:<o creation daquela foto>}] "
-        "com TODOS os personagens citados. Assim rosto/cabelo/roupa ficam idênticos às fotos.\n\n"
+        "2) OS DOIS PROTAGONISTAS EM TODA IMAGEM: para CADA prompt, monte references SEMPRE com os "
+        "DOIS personagens principais — [Character 1] e [Character 2] do character_bible.txt — "
+        "ANEXANDO a foto de cada um, MESMO que a linha do prompt cite só um deles (ou nenhum). "
+        "Some ainda qualquer outro [Character N: NAME] citado. Formato "
+        "references=[{type:\"character\", identifier:<o creation daquela foto>}, ...], type:\"character\" "
+        "pra cada. DEDUPLIQUE por identifier — se dois personagens apontam pra MESMA foto de "
+        "referência, anexe essa foto uma vez só. Assim rosto/cabelo/roupa dos dois ficam idênticos "
+        "às fotos do VEO em todas as cenas.\n\n"
         "GERAÇÃO (padrão Magnific verificado — EM LOTE, 3 fases, NUNCA uma de cada vez):\n"
         "FASE 1 — DISPARE TODAS: num único turno, chame mcp__magnific__images_generate para CADA "
         "prompt que falta (%s), cada uma com {prompt:<o prompt daquela linha>, mode:\"%s\", "
-        "aspectRatio:\"%s\", count:1, references:<os personagens da cena>}. aspectRatio TRAVADO em "
+        "aspectRatio:\"%s\", count:1, references:<SEMPRE os dois protagonistas + secundários citados>}. "
+        "aspectRatio TRAVADO em "
         "%s (vídeo vertical) — NÃO troque. Guarde o `identifier` de todos.\n"
         "FASE 2 — ESPERE TODAS: mcp__magnific__creations_wait até todas concluírem; pegue o webUrl.\n"
         "FASE 3 — BAIXE TODAS: `Bash curl -L -o images/img_NNN.png \"<webUrl>\"` — o NNN é o número "

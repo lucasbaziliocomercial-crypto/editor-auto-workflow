@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Etapa 7 — Montagem final (vídeo vertical, FFmpeg).
+"""Etapa 7 — Montagem final (FFmpeg).
+
+O FORMATO (vertical 9:16 ou horizontal 16:9) NÃO é fixo aqui: vem das envs ROTEIRO_W/H,
+que o pipeline força por canal (ex.: Lena = 1920x1080 horizontal — ver common.CANAL_FORMATO).
+O engine se chama `montagem_vertical` por herança do Romance Maker, mas respeita a env.
 
 Delega ao engine `montagem_vertical.construir`, que reproduz a estrutura do Romance Maker
 (teaser sincronizado ao gancho → capítulos com capa + imagens sincronizadas à narração →
@@ -30,8 +34,19 @@ def run(proj, log, cancel=None, **kw):
     if faltando:
         raise ErroPipeline("Montagem sem pré-requisitos: %s." % ", ".join(faltando))
 
-    log("▶ Etapa 7 — montagem final (FFmpeg, vertical)...")
+    import os
+    w = os.environ.get("ROTEIRO_W", "1080"); h = os.environ.get("ROTEIRO_H", "1920")
+    asp = os.environ.get("ROTEIRO_ASPECT", "9:16")
+    orient = "horizontal" if _int(w) >= _int(h) else "vertical"
+    log("▶ Etapa 7 — montagem final (FFmpeg, %sx%s %s / %s)..." % (w, h, asp, orient))
     montagem_vertical.construir(proj, log, cancel, parte=kw.get("parte"))
+
+
+def _int(v, d=0):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return d
 
 
 # --- teste standalone: py -3 stages/s7_montagem.py <slug> -----------------------------

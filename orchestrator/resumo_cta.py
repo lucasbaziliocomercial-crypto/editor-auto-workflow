@@ -5,12 +5,18 @@ Substitui o drop-in fixo (resumo_p2.mp4 / CTA por-vídeo) por GERAÇÃO a cada v
 os CLIPES DO TEASER (as mídias Veo daquele vídeo) como visual — MESMA referência de
 personagem, cenas SEMPRE diferentes. Decisão do editor (2026-07-09).
 
+TAKES INTEIROS (2026-07-09): os takes do VEO tocam COMPLETOS (ciclando a lista até cobrir o
+áudio; o último fecha inteiro, o rabo do áudio vira silêncio) — NÃO são mais picotados em
+cortes de ~3s (que deixavam tudo rápido demais e os vídeos incompletos). Ver _visual_completo.
+
   RESUMO P2 — o TEXTO já está no roteiro (o bloco-gancho logo antes de "PARTE 2" / depois de
     "END OF PART 1"; ver roteiro_estrutura.resumo_parte2). Narra esse texto na voz do canal
-    (TTS CapCut), distribui os clipes do teaser pela duração do áudio e sincroniza.
-    Override manual: projects/<slug>/resumo_p2.txt.
+    (TTS CapCut) e mostra os takes do VEO inteiros por baixo. Override manual:
+    projects/<slug>/resumo_p2.txt. VINHETA de abertura (a "cara" do resumo, fornecida pela
+    editora) entra na frente: projects/<slug>/resumo/vinheta.* > materiais/<canal>/resumo/
+    vinheta.* (aceita intro/abertura/bumper/card). Ver _vinheta.
   CTA — BASE FIXA por canal (materiais/<canal>/cta/cta_base.mp4): o ÁUDIO é fixo (a mesma
-    chamada final sempre); só o VISUAL muda, reposto pelos clipes do teaser.
+    chamada final sempre); só o VISUAL muda, reposto pelos takes do VEO inteiros.
 
 Legenda: NÃO é queimada aqui. O passo final da montagem (montagem_vertical._legendar)
 re-transcreve o vídeo inteiro JÁ MONTADO e queima UMA legenda única (queimar aqui dobraria).
@@ -58,6 +64,137 @@ def _visual_teaser(ff, clips, dur, w, h, fps, out, log):
     if not seq:
         return False
     return MV._concat_videos_trim(ff, seq, durs, w, h, fps, out, log)
+
+
+# ---------------------------------------------------------------------------
+# Visual COMPLETO: cada take do VEO tocando INTEIRO (sem picotar)
+# ---------------------------------------------------------------------------
+# Decisão da editora (2026-07-09): no resumo/CTA os takes do VEO (teaser) devem aparecer
+# COMPLETOS — nada de cortes de ~3s pra "caber" no áudio (o que deixava tudo rápido demais e os
+# vídeos incompletos). A lista é ciclada até COBRIR o áudio; cada take entra na íntegra e o
+# ÚLTIMO fecha completo (o rabo do áudio, se sobrar, vira silêncio no mux). Substitui o
+# _visual_teaser (que picotava) SÓ no resumo/CTA — o ultimo_minuto continua com _plano_cortes.
+
+def _plano_completo(ff, clips, dur_alvo, max_voltas=12):
+    """Sequência de clipes (ciclando a lista) cujas durações NATURAIS somam >= dur_alvo, cada
+    um INTEIRO (nunca cortado). Uma passada no mínimo; o teto evita loop infinito."""
+    if not clips:
+        return []
+    durs = [max(0.3, MV._dur(ff, c)) for c in clips]
+    seq, acc, i, teto = [], 0.0, 0, len(clips) * max(1, max_voltas)
+    while acc < dur_alvo and len(seq) < teto:
+        seq.append(clips[i % len(clips)])
+        acc += durs[i % len(clips)]
+        i += 1
+    return seq or list(clips)
+
+
+def _concat_full(ff, clips, w, h, fps, out, log):
+    """Concatena os clipes JÁ INTEIROS (cada um enquadrado em w×h, mudo) — SEM trim.
+    -c copy; re-encoda no fallback se os formatos divergirem."""
+    if not clips:
+        return False
+    tmp = out.parent
+    partes = []
+    for k, c in enumerate(clips):
+        pc = tmp / ("_full_%02d.mp4" % k)
+        MV._video_ajustado(ff, c, None, w, h, fps, pc, log, mudo=True)  # dur=None => inteiro
+        if pc.exists() and pc.stat().st_size > 0:
+            partes.append(pc)
+    if not partes:
+        return False
+    lista = tmp / "_full_concat.txt"
+    lista.write_text("".join("file '%s'\n" % p.name for p in partes), encoding="utf-8")
+    MV._run([ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+             "-i", str(lista), "-c", "copy", str(out)], log, "full-concat")
+    if not (out.exists() and out.stat().st_size > 0):
+        MV._run([ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+                 "-i", str(lista), *MV._venc_args(fps), "-an", str(out)], log, "full-concat-reenc")
+    lista.unlink(missing_ok=True)
+    for p in partes:
+        p.unlink(missing_ok=True)
+    return out.exists() and out.stat().st_size > 0
+
+
+def _visual_completo(ff, clips, dur_alvo, w, h, fps, out, log):
+    """Vídeo mudo = takes do VEO INTEIROS, ciclando até cobrir dur_alvo."""
+    seq = _plano_completo(ff, clips, dur_alvo)
+    if not seq:
+        return False
+    return _concat_full(ff, seq, w, h, fps, out, log)
+
+
+def _mux_video_lead(ff, video_mudo, audio, out, log):
+    """Junta vídeo (INTEIRO, manda na duração) + áudio, preenchendo o rabo do áudio com
+    silêncio (apad) quando ele é mais curto que o vídeo — assim o último take fecha COMPLETO
+    em vez de ser cortado pelo -shortest (o vídeo, finito, é quem termina)."""
+    cmd = [ff, "-y", "-hide_banner", "-loglevel", "error",
+           "-i", str(video_mudo), "-i", str(audio),
+           "-filter_complex", "[1:a]apad[a]", "-map", "0:v:0", "-map", "[a]",
+           "-c:v", "copy", *MV._AENC, "-shortest", str(out)]
+    MV._run(cmd, log, "mux-video-lead")
+    return out.exists() and out.stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# Vinheta: a "cara" que ANUNCIA o segmento (fornecida pela editora)
+# ---------------------------------------------------------------------------
+# A editora larga um clipe-vinheta e a esteira só troca a mídia de fundo atrás dele (porta a
+# ideia do template CapCut do Romance Maker: vinheta fixa + faixa de vídeo trocável). Sem a
+# vinheta o resumo somia no meio do vídeo ("não vi aparecer"). Resolvido por-vídeo > por-canal.
+
+_VIN_ALIASES = ("vinheta", "intro", "abertura", "bumper", "card")
+
+
+def _vinheta(proj, base_mat, tipo):
+    """Clipe-vinheta que abre o segmento: projects/<slug>/<tipo>/(vinheta|intro|...).<ext> >
+    materiais/<canal>/<tipo>/... (+ herdado). `tipo` = 'resumo' ou 'cta'. None se não houver."""
+    dirs = [proj.dir / tipo] + [d / tipo for d in common.materiais_dirs(base_mat.name)]
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for al in _VIN_ALIASES:
+            for p in sorted(d.glob(al + ".*")):
+                if p.is_file() and p.suffix.lower() in MV.VIDEO_EXTS:
+                    return p
+    return None
+
+
+def _seg_de_clipe(ff, clip, w, h, fps, out, log):
+    """Transforma um clipe (a vinheta) num segmento uniforme (vídeo+áudio em w×h). Mantém o
+    áudio próprio; se não tiver, gera silêncio da mesma duração (fica compatível pra concat)."""
+    if MV._tem_audio(ff, clip):
+        MV._video_ajustado(ff, clip, None, w, h, fps, out, log, mudo=False)
+        return out.exists() and out.stat().st_size > 0
+    vmudo = out.parent / ("_v_" + out.stem + ".mp4")
+    MV._video_ajustado(ff, clip, None, w, h, fps, vmudo, log, mudo=True)
+    aud = out.parent / ("_a_" + out.stem + ".m4a")
+    MV._silencio(ff, MV._dur(ff, vmudo), aud, log)
+    ok = MV._mux(ff, vmudo, aud, out, log)
+    vmudo.unlink(missing_ok=True)
+    aud.unlink(missing_ok=True)
+    return ok
+
+
+def _concat_segs(ff, partes, fps, out, log):
+    """Concatena segmentos (vídeo+áudio) uniformes -> out (ex.: [vinheta, corpo]).
+    -c copy; re-encoda no fallback."""
+    partes = [p for p in partes if p and p.exists() and p.stat().st_size > 0]
+    if not partes:
+        return False
+    if len(partes) == 1:
+        import shutil
+        shutil.copyfile(partes[0], out)
+        return out.exists() and out.stat().st_size > 0
+    lista = out.parent / ("_" + out.stem + "_segs.txt")
+    lista.write_text("".join("file '%s'\n" % p.name for p in partes), encoding="utf-8")
+    MV._run([ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+             "-i", str(lista), "-c", "copy", str(out)], log, "seg-concat")
+    if not (out.exists() and out.stat().st_size > 0):
+        MV._run([ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+                 "-i", str(lista), *MV._venc_args(fps), *MV._AENC, str(out)], log, "seg-concat-reenc")
+    lista.unlink(missing_ok=True)
+    return out.exists() and out.stat().st_size > 0
 
 
 def _extrair_audio(ff, src, out, log):
@@ -132,14 +269,35 @@ def construir_resumo_p2(proj, base_mat, teaser_clips, w, h, fps, tmp, log, cance
         log("    ⚠ resumo P2: áudio TTS vazio/curto — pulando geração.")
         return None
 
-    vmudo = tmp / "_v_resumo.mp4"
-    if not _visual_teaser(ff, teaser_clips, dur, w, h, fps, vmudo, log):
+    # CORPO: takes do VEO INTEIROS (ciclando até cobrir a narração) — nada de picotar.
+    body_v = tmp / "_v_resumo.mp4"
+    if not _visual_completo(ff, teaser_clips, dur, w, h, fps, body_v, log):
         return None
-    ok = MV._mux(ff, vmudo, aud, seg, log)
-    vmudo.unlink(missing_ok=True)
+    body = tmp / "_resumo_body.mp4"
+    ok = _mux_video_lead(ff, body_v, aud, body, log)   # takes completos + narração (rabo em silêncio)
+    body_v.unlink(missing_ok=True)
+    if not (ok and body.exists() and body.stat().st_size > 0):
+        return None
+
+    # VINHETA (a "cara" do resumo) — fornecida pela editora; abre o segmento.
+    partes = []
+    vin = _vinheta(proj, base_mat, "resumo")
+    if vin:
+        vin_seg = tmp / "_resumo_vinheta.mp4"
+        if _seg_de_clipe(ff, vin, w, h, fps, vin_seg, log):
+            partes.append(vin_seg)
+            log("    resumo P2: vinheta de abertura '%s' (%.1fs)." % (vin.name, MV._dur(ff, vin_seg)))
+    else:
+        log("    resumo P2: sem vinheta — largue materiais/%s/resumo/vinheta.mp4 (ou "
+            "projects/<slug>/resumo/vinheta.mp4) p/ anunciar o resumo." % base_mat.name)
+    partes.append(body)
+
+    ok = _concat_segs(ff, partes, fps, seg, log)
+    (tmp / "_resumo_vinheta.mp4").unlink(missing_ok=True)
+    body.unlink(missing_ok=True)
     if ok and seg.exists() and seg.stat().st_size > 0:
-        log("    ✓ resumo P2 gerado (%.1fs, %d clipe(s) do teaser reaproveitados)."
-            % (dur, len(teaser_clips)))
+        log("    ✓ resumo P2 gerado (narração %.1fs + %d take(s) do VEO INTEIROS%s)."
+            % (dur, len(teaser_clips), " + vinheta" if vin else ""))
         return seg
     return None
 
@@ -191,15 +349,16 @@ def construir_cta(proj, base_mat, modelos, teaser_clips, w, h, fps, tmp, log, ca
         aud.unlink(missing_ok=True)
         return None
 
+    # VISUAL: takes do VEO INTEIROS cobrindo o áudio fixo da CTA (sem picotar).
     vmudo = tmp / "_v_cta.mp4"
-    if not _visual_teaser(ff, teaser_clips, dur, w, h, fps, vmudo, log):
+    if not _visual_completo(ff, teaser_clips, dur, w, h, fps, vmudo, log):
         aud.unlink(missing_ok=True)
         return None
-    ok = MV._mux(ff, vmudo, aud, seg, log)
+    ok = _mux_video_lead(ff, vmudo, aud, seg, log)   # takes completos + áudio-base (rabo em silêncio)
     vmudo.unlink(missing_ok=True)
     aud.unlink(missing_ok=True)
     if ok and seg.exists() and seg.stat().st_size > 0:
-        log("    ✓ CTA gerada (base fixa '%s' %.1fs + %d clipe(s) do teaser)."
+        log("    ✓ CTA gerada (áudio-base '%s' %.1fs + %d take(s) do VEO INTEIROS)."
             % (base.name, dur, len(teaser_clips)))
         return seg
     return None

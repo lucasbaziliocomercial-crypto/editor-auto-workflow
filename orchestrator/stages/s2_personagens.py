@@ -3,12 +3,15 @@
 
 Contrato: run(proj, log, cancel, **_). Idempotente (âncora = character_bible.txt).
 
-Estratégia de REFERÊNCIA VISUAL (confirmada com a equipe):
-  - Se o card já traz IMAGENS DE PERSONAGEM anexadas (ex.: "82 - Personagem Homem.png",
-    "82 - Personagem Mulher.png") — caso dos canais Auroa e afins — usamos ESSAS como
-    verdade de aparência (modo "refs_do_card").
+Estratégia de REFERÊNCIA VISUAL (confirmada com a equipe), em ordem de prioridade:
+  - Se a EDITORA largou fotos de personagem na pasta do vídeo (projects/<slug>/personagens/,
+    pela GUI — junto com o teaser), usamos ESSAS como verdade de aparência (modo "refs_locais").
+    São as mesmas fotos que o MCP do Magnific usa de referência na Etapa 5. Têm prioridade.
+  - Senão, se o card traz IMAGENS DE PERSONAGEM anexadas (ex.: "82 - Personagem Homem.png",
+    "82 - Personagem Mulher.png") — caso dos canais Auroa e afins — usamos ESSAS (modo "refs_do_card").
   - Senão, usamos a CAPA/thumbnail anexada ("CAPA VERTICAL"/"THUMB") como verdade visual e
     derivamos os 2 personagens dela (modo "da_thumb").
+A CAPA (estilo visual) é sempre puxada do card quando existir, mesmo no modo "refs_locais".
 
 Esta parte (ingestão) é 100% determinística e testável. A geração do character_bible.txt e o
 registro na Library do Magnific vêm como passos seguintes (usam claude -p / MCP).
@@ -17,6 +20,7 @@ registro na Library do Magnific vêm como passos seguintes (usam claude -p / MCP
 import os
 import re
 import json
+import shutil
 import urllib.request
 
 import clickup_api
@@ -50,10 +54,47 @@ def _eh_imagem(a):
                for e in IMG_EXTS)
 
 
-def ingerir_refs(proj, log):
-    """Baixa e classifica os anexos do card. Devolve o manifesto (dict) e grava referencias.json.
+def _genero_por_nome(nome):
+    """'homem/male' -> 'm', 'mulher/female' -> 'f', indefinido -> 'x' (pelo nome do arquivo)."""
+    if _RE_HOMEM.search(nome):
+        return "m"
+    if _RE_MULHER.search(nome):
+        return "f"
+    return "x"
 
-    Manifesto: {modo, personagens:[{genero, arquivo}], capa, card_id}."""
+
+def _personagens_locais(proj, log):
+    """Fotos de personagem que a EDITORA largou em projects/<slug>/personagens/ (via GUI).
+
+    Copia cada imagem para referencias/ (nome ref_<genero>_<n>.png, como os anexos do card) e
+    devolve [{genero, arquivo}]. Vazio se a pasta não existir ou não tiver imagem. O gênero é
+    deduzido do NOME do arquivo (homem/mulher/male/female); indefinido = 'x' (a bible descobre
+    quem é quem pelo roteiro)."""
+    d = proj.personagens_dir
+    if not d.is_dir():
+        return []
+    imgs = sorted(p for p in d.iterdir() if p.is_file() and p.suffix.lower() in IMG_EXTS)
+    if not imgs:
+        return []
+    refs_dir = proj.referencias_dir
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    personagens = []
+    for i, src in enumerate(imgs, 1):
+        genero = _genero_por_nome(src.name)
+        arq = refs_dir / ("ref_%s_%d.png" % (
+            {"m": "homem", "f": "mulher", "x": "personagem"}[genero], i))
+        shutil.copy2(str(src), str(arq))
+        log("    personagem local: %s -> %s" % (src.name, arq.name))
+        personagens.append({"genero": genero, "arquivo": arq.name})
+    return personagens
+
+
+def ingerir_refs(proj, log):
+    """Reúne e classifica as referências visuais. Devolve o manifesto (dict) e grava referencias.json.
+
+    Prioridade: fotos LOCAIS (projects/<slug>/personagens/, largadas pela editora na GUI) >
+    anexos de personagem do card > capa/thumb do card. Manifesto:
+    {modo, personagens:[{genero, arquivo}], capa, card_id}."""
     if not proj.source.is_file():
         raise ErroPipeline("source.json não existe — rode a Etapa 1 antes da 2.")
     source = json.loads(proj.source.read_text(encoding="utf-8"))
@@ -61,17 +102,19 @@ def ingerir_refs(proj, log):
     if not card_id:
         raise ErroPipeline("source.json sem card_id.")
 
-    task = clickup_api._get("/task/%s" % card_id)
-    anexos = [a for a in (task.get("attachments") or []) if _eh_imagem(a)]
-    if not anexos:
-        raise ErroPipeline(
-            "Card %s não tem imagens anexadas (nem personagens nem capa). A Etapa 2 precisa "
-            "da capa OU das refs de personagem no card." % card_id)
-
     refs_dir = proj.referencias_dir
     refs_dir.mkdir(parents=True, exist_ok=True)
 
-    personagens = []
+    # (1) Personagens LOCAIS têm prioridade — é o caminho "já mandei as fotos junto do teaser".
+    personagens = _personagens_locais(proj, log)
+    usou_local = bool(personagens)
+    if usou_local:
+        log("  %d foto(s) de personagem local(is) em personagens/ — ignorando anexos de personagem do card." % len(personagens))
+
+    # (2) Card: sempre tenta a CAPA (estilo visual); as fotos de personagem do card só entram
+    # se NÃO houver fotos locais (fallback do comportamento antigo).
+    task = clickup_api._get("/task/%s" % card_id)
+    anexos = [a for a in (task.get("attachments") or []) if _eh_imagem(a)]
     capa = None
     for a in anexos:
         titulo = a.get("title") or ""
@@ -79,6 +122,8 @@ def ingerir_refs(proj, log):
         if not url:
             continue
         if _RE_PERSONAGEM.search(titulo):
+            if usou_local:
+                continue  # já temos os personagens locais — não sobrescreve
             genero = "m" if _RE_HOMEM.search(titulo) else ("f" if _RE_MULHER.search(titulo) else "x")
             arq = refs_dir / ("ref_%s_%s.png" % (
                 {"m": "homem", "f": "mulher", "x": "personagem"}[genero], len(personagens) + 1))
@@ -88,13 +133,14 @@ def ingerir_refs(proj, log):
             capa = proj.thumb_ref
             _baixar(url, capa, log)
 
-    # Sem refs explícitas de personagem, mas com capa -> modo "da_thumb" (deriva da capa).
-    modo = "refs_do_card" if personagens else ("da_thumb" if capa else None)
-    if modo is None:
+    # Ordem de modo: local > card > da_thumb. Sem NENHUMA referência (nem local, nem card) falha.
+    if not personagens and not capa:
         raise ErroPipeline(
-            "Não achei nem refs de personagem ('Personagem …') nem capa ('CAPA/THUMB') "
-            "nos anexos do card %s. Anexos: %s"
-            % (card_id, [a.get("title") for a in anexos]))
+            "Sem referência visual pra ancorar as imagens: nem fotos de personagem em "
+            "projects/%s/personagens/ (largue pela GUI), nem anexos de personagem/capa no "
+            "card %s. Anexos do card: %s"
+            % (proj.dir.name, card_id, [a.get("title") for a in anexos]))
+    modo = "refs_locais" if usou_local else ("refs_do_card" if personagens else "da_thumb")
 
     manifesto = {
         "card_id": card_id,
@@ -115,8 +161,14 @@ _ROTULO_GENERO = {"m": "male lead", "f": "female lead", "x": "supporting charact
 def _prompt_bible(manifesto):
     """Monta o prompt (PT) que faz o Claude LER as refs + roteiro e escrever character_bible.txt (EN)."""
     linhas_refs = []
+    local = manifesto.get("modo") == "refs_locais"
     for p in manifesto["personagens"]:
-        linhas_refs.append("  - referencias/%s  → %s" % (p["arquivo"], _ROTULO_GENERO.get(p["genero"], "character")))
+        # Fotos locais de gênero indefinido são os PROTAGONISTAS (a editora largou os leads),
+        # não figurantes — o roteiro decide quem é homem/mulher.
+        rotulo = _ROTULO_GENERO.get(p["genero"], "character")
+        if p["genero"] == "x" and local:
+            rotulo = "main character / lead (descubra o gênero e o papel pelo roteiro)"
+        linhas_refs.append("  - referencias/%s  → %s" % (p["arquivo"], rotulo))
     if manifesto.get("capa"):
         linhas_refs.append("  - %s  → CAPA/thumbnail (estilo visual e clima da história)" % manifesto["capa"])
     refs_txt = "\n".join(linhas_refs) or "  (sem imagens — derive do roteiro)"

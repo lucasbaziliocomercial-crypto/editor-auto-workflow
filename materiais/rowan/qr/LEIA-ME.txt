@@ -1,0 +1,5 @@
+QR CODE DA ISCA (Parte 1) — pasta deste canal
+=============================================
+Largue AQUI a imagem do QR deste canal (uma só): PNG/webp já enquadrado no frame,
+fundo transparente, no tamanho do vídeo do canal. A montagem aplica em toda P1.
+A Parte 2 não leva QR. Explicação completa e ajustes: ../../assets/qr/LEIA-ME.txt
