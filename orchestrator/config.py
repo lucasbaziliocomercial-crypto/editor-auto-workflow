@@ -173,6 +173,7 @@ DEFAULTS = {
     "ROTEIRO_TTS_STALE": "regen",         # narration.mp3 mais velho que roteiro.txt: regen|warn|off
     "ROTEIRO_TTS_STALE_TOL": "2",         # folga (s) no mtime p/ evitar falso-positivo
     "ROTEIRO_SYNC_GUARD": "1",            # Etapa 7 falha alto se 0 âncoras casam (0 = desliga)
+    "ROTEIRO_AUTO_REBUILD": "1",          # card já feito re-renderiza se o código de render mudou (0 = idempotência pura)
 }
 
 

@@ -85,7 +85,80 @@ def _montagem_obsoleta(proj):
     return _mais_velho(fin, proj.narration_mp3)
 
 
-def _etapa_pronta(proj, n):
+# Arquivos de CÓDIGO de que cada etapa de RENDER depende. Se algum for MAIS NOVO que o artefato,
+# o artefato foi produzido por código velho e NÃO tem as features novas (QR, legenda amarela,
+# sem-Veo, Ken Burns, resumo/CTA…) → a etapa re-roda e limpa o cache p/ rebuild completo. SÓ
+# etapas de render (6 capas, 7 montagem), sem custo externo. As caras — 4 (prompts LLM) e 5
+# (imagens Magnific, queima crédito) — NÃO entram: ali o usuário roda "Refazer" quando quiser.
+# ROTEIRO_AUTO_REBUILD=0 desliga (volta à idempotência pura por arquivo).
+_COD_DEPS = {
+    6: ("stages/s6_capas.py", "montagem_vertical.py"),
+    7: ("stages/s7_montagem.py", "montagem_vertical.py", "resumo_cta.py",
+        "qr_overlay.py", "ultimo_minuto.py"),
+}
+
+
+def _auto_rebuild_on():
+    return os.environ.get("ROTEIRO_AUTO_REBUILD", "1").strip().lower() \
+        not in ("0", "off", "no", "false", "nao", "não")
+
+
+def _artefato_mtime(proj, n):
+    """mtime do artefato-âncora da etapa (o mais NOVO, se for glob); None se não existe."""
+    alvo = STAGES[n][1]
+    try:
+        if "*" in alvo:
+            d, pad = alvo.split("/", 1)
+            fs = list((proj.dir / d).glob(pad))
+            return max((f.stat().st_mtime for f in fs), default=None)
+        p = proj.dir / alvo
+        return p.stat().st_mtime if p.exists() else None
+    except OSError:
+        return None
+
+
+def _codigo_desatualizado(proj, n):
+    """Nome do 1º arquivo de código da etapa n que é MAIS NOVO que o artefato-âncora (= artefato
+    feito por código velho, sem as features novas). None se nenhum / etapa não-render / desligado."""
+    if not _auto_rebuild_on() or n not in _COD_DEPS:
+        return None
+    art = _artefato_mtime(proj, n)
+    if art is None:
+        return None
+    base = os.path.dirname(os.path.abspath(__file__))
+    tol = float(os.environ.get("ROTEIRO_TTS_STALE_TOL", "2"))
+    for rel in _COD_DEPS[n]:
+        f = os.path.join(base, rel)
+        try:
+            if os.path.exists(f) and art + tol < os.path.getmtime(f):
+                return os.path.basename(rel)
+        except OSError:
+            pass
+    return None
+
+
+def _limpar_render(proj, n, log):
+    """Limpa os artefatos de RENDER da etapa p/ um rebuild completo (as features novas re-aplicam,
+    sem reuso de segmento). NÃO toca em entradas de outras etapas (ex.: covers/titulo_*.mp3 é da
+    Etapa 3, então na 6 só apagamos os .mp4 das capas)."""
+    import shutil
+    if n == 7:
+        outd = proj.dir / "out"
+        if outd.exists():
+            shutil.rmtree(outd, ignore_errors=True)
+            log("  limpei out/ (segmentos + vídeo) p/ remontar do zero com as features novas.")
+    elif n == 6:
+        apagados = 0
+        for p in proj.covers_dir.glob("*.mp4"):
+            try:
+                p.unlink(); apagados += 1
+            except OSError:
+                pass
+        if apagados:
+            log("  limpei %d capa(s) p/ regerar." % apagados)
+
+
+def _etapa_pronta(proj, n, log=None):
     """True se o artefato-âncora da etapa n já existe (base da idempotência/‘Continuar’)."""
     alvo = STAGES[n][1]
     if "*" in alvo:
@@ -98,8 +171,12 @@ def _etapa_pronta(proj, n):
     # um áudio anterior (após a Etapa 3 regenerar). Sem isto, a re-rodada 'já pronta' pula tudo
     # e o vídeo sai/continua dessincronizado.
     if pronta and n == 3 and _narracao_obsoleta(proj):
+        if log:
+            log("Etapa 3 (s3_narracao): narração é de outro draft do roteiro — regenerando p/ sincronizar.")
         return False
     if pronta and n == 7 and _montagem_obsoleta(proj):
+        if log:
+            log("Etapa 7 (s7_montagem): vídeo montado com áudio anterior — remontando p/ sincronizar.")
         return False
     return pronta
 
@@ -289,9 +366,18 @@ def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
                 break
             nome_mod, _ = STAGES[n]
             _aplicar_formato_canal(proj, log)
-            if _etapa_pronta(proj, n) and not refazer:
-                log("Etapa %d (%s): já pronta — pulando." % (n, nome_mod))
-                continue
+            if not refazer:
+                # Código de render mudou desde o último artefato? Re-roda e limpa o cache p/ as
+                # features novas re-aplicarem (senão a idempotência por-segmento reusa o antigo —
+                # foi por isso que o card 256 saiu "igual" mesmo com as mudanças no código).
+                dep = _codigo_desatualizado(proj, n)
+                if dep:
+                    log("Etapa %d (%s): código novo (%s) desde o último render — refazendo p/ aplicar as mudanças."
+                        % (n, nome_mod, dep))
+                    _limpar_render(proj, n, log)
+                elif _etapa_pronta(proj, n, log):
+                    log("Etapa %d (%s): já pronta — pulando." % (n, nome_mod))
+                    continue
             log("── Etapa %d — %s ─────────────────────────" % (n, nome_mod))
             try:
                 mod = importlib.import_module("stages." + nome_mod)
