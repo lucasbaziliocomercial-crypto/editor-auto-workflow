@@ -14,7 +14,7 @@ import queue
 import traceback
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog
+from tkinter import ttk, scrolledtext, filedialog, messagebox
 
 import config  # noqa: F401  (liga as env vars da esteira)
 import pipeline
@@ -318,6 +318,11 @@ class App:
         self.b_continuar = ttk.Button(bar, text="▶▶  Continuar", style="Cont.TButton",
                                      command=self.continuar, state="disabled")
         self.b_continuar.pack(side="left")
+        # "Refazer do zero": regenera o card INTEIRO (1–8, refazer=ON) num clique — o vídeo vem com
+        # TODAS as mudanças de código/opções. Pede confirmação (regenera imagens = crédito Magnific).
+        self.b_refazer = ttk.Button(bar, text="♻  Refazer do zero", style="Big.TButton",
+                                    command=self.refazer_do_zero)
+        self.b_refazer.pack(side="left", padx=10)
         ttk.Button(bar, text="\U0001F4C1  Abrir pasta do projeto", style="Big.TButton",
                    command=self.abrir_pasta).pack(side="left", padx=10)
 
@@ -759,6 +764,34 @@ class App:
         self._lancar(dict(etapas=etapas, partes=partes, card=card, slug=slug, categoria=cat,
                           pular_gates=self.v_gates.get(), refazer=self.v_refazer.get()))
 
+    def refazer_do_zero(self):
+        """Botão 'Refazer do zero': regenera o card INTEIRO (etapas 1–8, refazer=ON) num clique, no
+        card/partes selecionados. Diferente do 'Rodar' normal (que só refaz sozinho as etapas
+        locais 3/6/7 e reusa o resto): aqui apaga TUDO, inclusive as imagens do corpo — que voltam
+        a queimar crédito no Magnific. Por isso confirma antes."""
+        card = self.cards.get(self.cb_card.get())
+        slug = self.e_slug.get().strip()
+        cat = self.cb_cat.get().strip() or None
+        if not card:
+            self._log("Escolha um card no dropdown (Categoria → Card)."); return
+        if not slug:
+            self._log("Slug vazio."); return
+        partes_lbl = "P1 + P2" if self.v_parte.get() == "ambas" else self.v_parte.get().upper()
+        if not messagebox.askyesno(
+                "Refazer do zero?",
+                "Vai REGERAR o card inteiro (%s), etapas 1–8, apagando os artefatos atuais:\n\n"
+                "• roteiro, personagens, narração, capas e montagem — reaplica TODAS as mudanças "
+                "novas do código;\n"
+                "• IMAGENS do corpo — regeradas no Magnific (consome CRÉDITO).\n\n"
+                "Continuar?" % partes_lbl):
+            return
+        self._aplicar_modelo_img()
+        partes = ["p1", "p2"] if self.v_parte.get() == "ambas" else [self.v_parte.get()]
+        etapas = sorted(n for n in self.vars if n in PRONTAS)
+        self._log("♻ Refazer do zero: card=%s | etapas %s | %s | refazer=ON" % (slug, etapas, partes))
+        self._lancar(dict(etapas=etapas, partes=partes, card=card, slug=slug, categoria=cat,
+                          pular_gates=self.v_gates.get(), refazer=True))
+
     def continuar(self):
         """Retoma a última rodada de onde parou. A esteira é idempotente por etapa
         (pula o artefato-âncora já existente), então isto NUNCA refaz o que ficou pronto."""
@@ -774,11 +807,13 @@ class App:
         self.cancel = Cancel()
         self.b_rodar.config(state="disabled")
         self.b_continuar.config(state="disabled")
+        self.b_refazer.config(state="disabled")
         self.b_parar.config(state="normal")
         partes = params["partes"]
 
         def worker():
             interrompido = False
+            proj_final = None
             try:
                 for pt in partes:
                     if self.cancel.is_set():
@@ -786,7 +821,8 @@ class App:
                     self._push("\n===== %s | etapas %s | %s | card=%s | slug=%s ====="
                                % (pt.upper(), params["etapas"], params["categoria"],
                                   params["card"], params["slug"]))
-                    pipeline.pipeline(etapas=params["etapas"], log=self._push, cancel=self.cancel,
+                    proj_final = pipeline.pipeline(
+                                      etapas=params["etapas"], log=self._push, cancel=self.cancel,
                                       slug=params["slug"], card_id=params["card"],
                                       categoria=params["categoria"], parte=pt,
                                       pular_gates=params["pular_gates"], refazer=params["refazer"])
@@ -798,7 +834,8 @@ class App:
                     self._push("ERRO: %s" % e); self._push(traceback.format_exc())
                     self._push("↻ Clique “Continuar” para retomar após corrigir o problema.")
             finally:
-                self.root.after(0, lambda i=interrompido: self._fim_run(i))
+                self.root.after(0, lambda i=interrompido, p=proj_final, e=list(params["etapas"]):
+                                self._fim_run(i, p, e))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -808,11 +845,65 @@ class App:
             self.b_parar.config(state="disabled")
             self._log("⏹ Parando… a esteira encerra ao terminar a operação atual (pode levar alguns segundos).")
 
-    def _fim_run(self, interrompido=False):
+    def _fim_run(self, interrompido=False, proj=None, etapas=()):
         self.b_rodar.config(state="normal")
+        self.b_refazer.config(state="normal")
         self.b_parar.config(state="disabled")
         # "Continuar" só faz sentido quando a rodada NÃO terminou inteira (parada ou erro).
         self.b_continuar.config(state=("normal" if interrompido else "disabled"))
+        # Só notifica quando a rodada REALMENTE fechou um vídeo (Etapa 7/8) e o final existe —
+        # não incomoda quando a editora rodou só uma etapa solta (ex.: só narração).
+        if interrompido or proj is None:
+            return
+        if not (7 in etapas or 8 in etapas):
+            return
+        try:
+            if not proj.existe(proj.final_mp4):
+                return
+        except Exception:
+            return
+        self._notificar_pronto(proj)
+
+    def _notificar_pronto(self, proj):
+        """Vídeo montado: som + traz o painel pra frente + oferece abrir a pasta de entrega."""
+        import os
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except Exception:
+            pass
+        try:
+            self.root.lift(); self.root.attributes("-topmost", True)
+            self.root.after(1500, lambda: self.root.attributes("-topmost", False))
+        except Exception:
+            pass
+        pasta = self._pasta_entrega(proj)
+        if pasta and messagebox.askyesno(
+                "Vídeo pronto ✓",
+                "A esteira terminou a montagem do vídeo.\n\n"
+                "Abrir a pasta de entrega agora?\n\n%s" % pasta):
+            try:
+                os.startfile(str(pasta))
+            except Exception as e:  # noqa: BLE001
+                self._log("Não consegui abrir a pasta: %s" % e)
+
+    @staticmethod
+    def _pasta_entrega(proj):
+        """Melhor pasta pra 'abrir': ENTREGAS/<card> (P1+P2 juntas) → VIDEOS-PRONTOS → projeto."""
+        try:
+            from stages.s8_entrega import _card_e_parte, ENTREGAS_DIR, VIDEOS_PRONTOS_DIR
+            base, _ = _card_e_parte(proj)
+            d = ENTREGAS_DIR / base
+            if d.is_dir():
+                return d
+            if VIDEOS_PRONTOS_DIR.is_dir():
+                return VIDEOS_PRONTOS_DIR
+        except Exception:
+            pass
+        try:
+            return proj.dir
+        except Exception:
+            return None
 
 
 def main():

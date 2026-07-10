@@ -4,32 +4,38 @@
     {
       "n": 1,
       "titulo": "The bell tolled for the last time",
-      "primeira_frase": "The bouquet trembled in my hand, and I couldn't decide whether it"
+      "primeira_frase": "The bouquet trembled in my hand, and I couldn't decide whether it",
+      "titulo_dur": 3.715
     },
     {
       "n": 2,
       "titulo": "The offer from the man the town fears",
-      "primeira_frase": "Café Vecchia Roma sat on a corner of the old neighborhood where"
+      "primeira_frase": "Café Vecchia Roma sat on a corner of the old neighborhood where",
+      "titulo_dur": 3.437
     },
     {
       "n": 3,
       "titulo": "House rules, the man's gestures",
-      "primeira_frase": "The Caracciolo mansion woke before I did."
+      "primeira_frase": "The Caracciolo mansion woke before I did.",
+      "titulo_dur": 3.715
     },
     {
       "n": 4,
       "titulo": "The shadow returns",
-      "primeira_frase": "Two weeks later, I learned that a mansion sleeps differently from normal"
+      "primeira_frase": "Two weeks later, I learned that a mansion sleeps differently from normal",
+      "titulo_dur": 2.926
     },
     {
       "n": 5,
       "titulo": "The truth without a contract",
-      "primeira_frase": "The folder under his arm was too thick."
+      "primeira_frase": "The folder under his arm was too thick.",
+      "titulo_dur": 2.322
     },
     {
       "n": 6,
       "titulo": "The door that closes, the morning that dawns",
-      "primeira_frase": "His hand was warm on my cheek."
+      "primeira_frase": "His hand was warm on my cheek.",
+      "titulo_dur": 4.087
     }
   ]
 }

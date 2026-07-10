@@ -1,0 +1,41 @@
+{
+  "hook_chars": 0,
+  "capitulos": [
+    {
+      "n": 1,
+      "titulo": "The Morning Before the Folder",
+      "primeira_frase": "I woke before her, like always.",
+      "titulo_dur": 2.972
+    },
+    {
+      "n": 2,
+      "titulo": "The Closed Door and the Man Outside",
+      "primeira_frase": "The afternoon fell over the old contract room without me moving from",
+      "titulo_dur": 3.297
+    },
+    {
+      "n": 3,
+      "titulo": "What His Handwriting Never Said",
+      "primeira_frase": "Sunday began cold, the way Providence knows how to be cold even",
+      "titulo_dur": 3.019
+    },
+    {
+      "n": 4,
+      "titulo": "The Writing on the Page, the Voice in the Ear",
+      "primeira_frase": "I knew she'd come down.",
+      "titulo_dur": 3.947
+    },
+    {
+      "n": 5,
+      "titulo": "The Night She Chose to Stay",
+      "primeira_frase": "The blast entered my sleep before the sound itself did.",
+      "titulo_dur": 2.833
+    },
+    {
+      "n": 6,
+      "titulo": "Beneath Flowers, and After His Weeping",
+      "primeira_frase": "Bastian stood near the window of the breakfast room with the newspaper",
+      "titulo_dur": 4.226
+    }
+  ]
+}

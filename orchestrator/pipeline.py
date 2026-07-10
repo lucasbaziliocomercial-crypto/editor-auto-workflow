@@ -35,6 +35,18 @@ from common import Projeto, ErroPipeline, slugify, PROJECTS_DIR, projeto_por_slu
 
 TODAS = (1, 2, 3, 4, 5, 6, 7, 8)
 
+# Rótulo curto por etapa (pro resumo de tempos no fim da rodada).
+STAGE_LABELS = {
+    1: "ClickUp/roteiro",
+    2: "Personagens",
+    3: "Narração",
+    4: "Prompts",
+    5: "Imagens",
+    6: "Capas",
+    7: "Montagem",
+    8: "Entrega",
+}
+
 # Etapa -> (módulo em stages/, artefato-âncora relativo ao proj p/ idempotência).
 # O âncora é checado por proj.existe(); glob (com *) usa list(dir.glob(...)).
 STAGES = {
@@ -85,17 +97,30 @@ def _montagem_obsoleta(proj):
     return _mais_velho(fin, proj.narration_mp3)
 
 
-# Arquivos de CÓDIGO de que cada etapa de RENDER depende. Se algum for MAIS NOVO que o artefato,
-# o artefato foi produzido por código velho e NÃO tem as features novas (QR, legenda amarela,
-# sem-Veo, Ken Burns, resumo/CTA…) → a etapa re-roda e limpa o cache p/ rebuild completo. SÓ
-# etapas de render (6 capas, 7 montagem), sem custo externo. As caras — 4 (prompts LLM) e 5
-# (imagens Magnific, queima crédito) — NÃO entram: ali o usuário roda "Refazer" quando quiser.
-# ROTEIRO_AUTO_REBUILD=0 desliga (volta à idempotência pura por arquivo).
+# Arquivos de CÓDIGO de que cada etapa depende. Se algum for MAIS NOVO que o artefato-âncora, o
+# artefato foi produzido por código velho e NÃO tem as features/ajustes novos → o auto-rebuild age.
+# _CORE_DEPS = base compartilhada (common.py tem o CANAL_VOZ; por isso mudar a voz reflete na
+# Etapa 3) — vale pra TODAS as etapas rastreadas. _COD_DEPS = arquivos específicos de cada etapa.
+#
+# DUAS POLÍTICAS (decisão 2026-07-09, "só local/grátis"):
+#   • _AUTO_REBUILD_STAGES = {3, 6, 7} → LOCAL/GRÁTIS: quando o código muda, a etapa RE-RODA sozinha
+#     e limpa o cache p/ reaplicar (narração, capas, montagem — sem custo externo). É o que faz
+#     "toda mudança minha já entrar" ao reusar o mesmo card.
+#   • Rastreadas mas FORA do auto (2 bible, 4 prompts, 5 imagens Magnific $$$) → só AVISAM
+#     "código novo, rode Refazer": a cadeia 2→4→5 termina em crédito Magnific, então não refaço
+#     sozinho (evita queimar crédito e bible/prompt novo com imagem velha).
+# ROTEIRO_AUTO_REBUILD=0 desliga tudo (volta à idempotência pura por arquivo).
+_CORE_DEPS = ("common.py", "config.py")
 _COD_DEPS = {
-    6: ("stages/s6_capas.py", "montagem_vertical.py"),
+    2: ("stages/s2_personagens.py", "clickup_api.py", "runner.py", "roteiro_estrutura.py"),
+    3: ("stages/s3_narracao.py", "runner.py", "roteiro_estrutura.py", "capcut_tts.py", "vozes_p2.py"),
+    4: ("stages/s4_prompts.py", "runner.py", "roteiro_estrutura.py"),
+    5: ("stages/s5_imagens.py", "stages/magnific_seam.py"),
+    6: ("stages/s6_capas.py", "covers.py", "roteiro_estrutura.py", "montagem_vertical.py"),
     7: ("stages/s7_montagem.py", "montagem_vertical.py", "resumo_cta.py",
         "qr_overlay.py", "ultimo_minuto.py"),
 }
+_AUTO_REBUILD_STAGES = {3, 6, 7}
 
 
 def _auto_rebuild_on():
@@ -127,7 +152,7 @@ def _codigo_desatualizado(proj, n):
         return None
     base = os.path.dirname(os.path.abspath(__file__))
     tol = float(os.environ.get("ROTEIRO_TTS_STALE_TOL", "2"))
-    for rel in _COD_DEPS[n]:
+    for rel in _COD_DEPS[n] + _CORE_DEPS:
         f = os.path.join(base, rel)
         try:
             if os.path.exists(f) and art + tol < os.path.getmtime(f):
@@ -142,7 +167,25 @@ def _limpar_render(proj, n, log):
     sem reuso de segmento). NÃO toca em entradas de outras etapas (ex.: covers/titulo_*.mp3 é da
     Etapa 3, então na 6 só apagamos os .mp4 das capas)."""
     import shutil
-    if n == 7:
+    if n == 3:
+        # Narração: apaga o áudio + derivados (mesma lista da trava anti-áudio-velho) p/ o TTS
+        # rodar de novo com o código/voz atual (ex.: CANAL_VOZ mudou no common.py). Os _tts_*.mp3
+        # são chunks de um run interrompido — limpa também p/ não reusar a voz antiga.
+        alvos = 0
+        for f in (proj.narration_mp3, proj.narration_raw, proj.pausas_flag, proj.narration_srt):
+            try:
+                if f.exists():
+                    f.unlink(missing_ok=True); alvos += 1
+            except OSError:
+                pass
+        for p in proj.dir.glob("_tts_*.mp3"):
+            try:
+                p.unlink(); alvos += 1
+            except OSError:
+                pass
+        if alvos:
+            log("  limpei narração + derivados p/ re-sintetizar o TTS com o código/voz atual.")
+    elif n == 7:
         outd = proj.dir / "out"
         if outd.exists():
             shutil.rmtree(outd, ignore_errors=True)
@@ -338,6 +381,32 @@ def _fmt_dur(seg):
     return "%ds" % s
 
 
+def _fmt_min(seg):
+    """Segundos -> minutos com 1 casa (o que a editora quer pra ter noção do gargalo)."""
+    return "%.1f min" % (seg / 60.0)
+
+
+def _resumo_tempos(proj, tempos, total, log):
+    """Loga o tempo por etapa (em minutos) e persiste em _tempos.json, pra dar noção de qual
+    processo demorou mais. `tempos` = {n: segundos} só das etapas que REALMENTE rodaram nesta
+    rodada (as puladas por idempotência não entram)."""
+    if tempos:
+        log("── Tempo por etapa (esta rodada) ─────────────")
+        for n in sorted(tempos):
+            log("   Etapa %d — %-16s %8s" % (n, STAGE_LABELS.get(n, ""), _fmt_min(tempos[n])))
+    log("   %-25s %8s" % ("TOTAL", _fmt_min(total)))
+    # Persiste pra editora comparar entre vídeos ao longo do tempo (dotfile discreto na pasta).
+    try:
+        dados = {
+            "total_min": round(total / 60.0, 2),
+            "etapas": {str(n): round(tempos[n] / 60.0, 2) for n in sorted(tempos)},
+        }
+        (proj.dir / "_tempos.json").write_text(
+            json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
              slug=None, card_query="Alpha King", card_id=None, categoria=None,
              parte="p1", pular_gates=False, refazer=False, **extra):
@@ -359,6 +428,7 @@ def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
     if p2_mode:
         _preparar_projeto_p2(parent, slug, log)
     lock = _adquirir_lock(proj, log)
+    tempos = {}  # {n: segundos} das etapas que realmente rodaram nesta rodada
     try:
         for n in sorted(etapas):
             if cancel and cancel():
@@ -367,17 +437,24 @@ def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
             nome_mod, _ = STAGES[n]
             _aplicar_formato_canal(proj, log)
             if not refazer:
-                # Código de render mudou desde o último artefato? Re-roda e limpa o cache p/ as
-                # features novas re-aplicarem (senão a idempotência por-segmento reusa o antigo —
-                # foi por isso que o card 256 saiu "igual" mesmo com as mudanças no código).
+                # Código da etapa mudou desde o último artefato? (senão a idempotência reusa o
+                # antigo — foi por isso que o card 256 saiu "igual" mesmo com o código mudado.)
                 dep = _codigo_desatualizado(proj, n)
-                if dep:
+                if dep and n in _AUTO_REBUILD_STAGES:
+                    # LOCAL/GRÁTIS (3/6/7): re-roda e limpa o cache p/ as mudanças reaplicarem.
                     log("Etapa %d (%s): código novo (%s) desde o último render — refazendo p/ aplicar as mudanças."
                         % (n, nome_mod, dep))
                     _limpar_render(proj, n, log)
-                elif _etapa_pronta(proj, n, log):
-                    log("Etapa %d (%s): já pronta — pulando." % (n, nome_mod))
-                    continue
+                else:
+                    if dep:
+                        # Rastreada mas FORA do auto (2 bible / 4 prompts / 5 imagens Magnific):
+                        # avisa, mas NÃO refaz sozinho (evita queimar crédito) — o usuário Refaz.
+                        log("Etapa %d (%s): código novo (%s) desde o último artefato — NÃO refiz sozinho "
+                            "(etapa custosa). Rode “Refazer” nesta etapa quando quiser reaplicar."
+                            % (n, nome_mod, dep))
+                    if _etapa_pronta(proj, n, log):
+                        log("Etapa %d (%s): já pronta — pulando." % (n, nome_mod))
+                        continue
             log("── Etapa %d — %s ─────────────────────────" % (n, nome_mod))
             try:
                 mod = importlib.import_module("stages." + nome_mod)
@@ -386,13 +463,18 @@ def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
                     "Etapa %d ainda não implementada (stages/%s.py não existe)." % (n, nome_mod))
             kw = dict(card_query=(alvo or card_query), card_id=card_id,
                       categoria=categoria, parte=parte, pular_gates=pular_gates)
+            t_etapa = time.perf_counter()
             mod.run(proj, log, cancel, **kw)
+            tempos[n] = time.perf_counter() - t_etapa
+            log("   ⏱ Etapa %d (%s) levou %s." % (n, STAGE_LABELS.get(n, nome_mod), _fmt_dur(tempos[n])))
             # Gates (só onde há humano). Desligados por --no-gates.
             if not pular_gates:
                 _gate(proj, n, log, cancel)
     finally:
         _liberar_lock(lock)
-    log("Concluído em %s (montagem do vídeo completo)." % _fmt_dur(time.perf_counter() - t0))
+    total = time.perf_counter() - t0
+    _resumo_tempos(proj, tempos, total, log)
+    log("Concluído em %s (montagem do vídeo completo)." % _fmt_dur(total))
     return proj
 
 

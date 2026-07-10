@@ -59,13 +59,14 @@ COMMANDS_DIR = Path.home() / ".claude" / "commands"
 # ---------------------------------------------------------------------------
 # Cada canal tem uma voz FEMININA (♀) e uma MASCULINA (♂). P1 usa só a ♀ (narração única);
 # P2 alterna ♀/♂ pelos marcadores ✦ NOME. Fonte: config_alves.json + planejamento.
-#   Kay/Lena/Spice/Selena → ♀ Joanne / ♂ Aramis      Rowan → Knightley (única, ♀=♂)
+#   Todos os canais → ♂ Knightley (POV masculino unificado). ♀ = Joanne (Rowan é Knightley ♀=♂).
+# 2026-07-09: TODOS os canais passaram a usar a MESMA voz masculina da Rowan (Knightley) — unifica o POV ♂ e simplifica.
 CANAL_VOZ = {
-    "kay":    {"f": "joanne",    "m": "aramis"},
+    "kay":    {"f": "joanne",    "m": "knightley"},
     "rowan":  {"f": "knightley", "m": "knightley"},
-    "lena":   {"f": "joanne",    "m": "aramis"},
-    "spice":  {"f": "joanne",    "m": "aramis"},
-    "selena": {"f": "joanne",    "m": "aramis"},
+    "lena":   {"f": "joanne",    "m": "knightley"},
+    "spice":  {"f": "joanne",    "m": "knightley"},
+    "selena": {"f": "joanne",    "m": "knightley"},
 }
 # nome da voz → id no CapCut-TTS. HOJE só a Joanne está capturada; Aramis/Knightley são
 # PENDÊNCIA (o editor precisa capturar os ids — liste com capcut_tts.py --speakers).
@@ -127,7 +128,8 @@ def materiais_canal(canal):
     O editor abastece uma vez por canal; o pipeline reaproveita em todo card. Cria a árvore
     padrão se não existir (vazia — só a estrutura, pro editor saber onde largar cada coisa)."""
     base = MATERIAIS_DIR / slugify(canal or "sem-canal", maxlen=40)
-    for sub in ("teaser", "take_p2", "book2", "cta", "padronizados", "template_capa", "qr"):
+    for sub in ("teaser", "take_p2", "book2", "cta", "padronizados", "template_capa", "qr",
+                "detalhes"):
         (base / sub).mkdir(parents=True, exist_ok=True)
     return base
 

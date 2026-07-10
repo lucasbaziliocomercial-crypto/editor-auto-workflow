@@ -1,6 +1,15 @@
 {
   "card_id": "86aj5ggq7",
-  "modo": "da_thumb",
-  "personagens": [],
+  "modo": "refs_locais",
+  "personagens": [
+    {
+      "genero": "x",
+      "arquivo": "ref_personagem_1.png"
+    },
+    {
+      "genero": "x",
+      "arquivo": "ref_personagem_2.png"
+    }
+  ],
   "capa": "thumb_ref.png"
 }

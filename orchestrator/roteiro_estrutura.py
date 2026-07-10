@@ -89,20 +89,26 @@ def parse_roteiro(texto):
     return {"hook": "\n".join(hook_linhas).strip(), "chapters": chapters}
 
 
-def _primeira_frase(corpo, max_palavras=12):
-    """Âncora textual do começo do capítulo: a 1ª frase, aparada em `max_palavras` palavras.
+def _primeira_frase(corpo, min_palavras=12, max_palavras=16):
+    """Âncora textual do começo do capítulo, usada pela montagem pra localizar o início do
+    capítulo na SRT (que não tem cabeçalho).
 
-    Usada pela montagem pra localizar o início do capítulo na SRT (que não tem cabeçalho).
-    Normaliza aspas curvas e espaços pra casar melhor com a transcrição do Whisper."""
+    Acumula FRASES INTEIRAS a partir do começo até juntar ~`min_palavras` palavras (aparando em
+    `max_palavras`). Antes pegava só a 1ª frase: quando ela é curta/genérica (ex.: "I knew she'd
+    come down.", 5 palavras), NÃO ancorava sozinha na narração e o capítulo caía na estimativa
+    proporcional (a capa/troca entrava minutos atrasada — card 250 P2, cap 4). Juntar a 2ª frase
+    dá o trecho distintivo ("...I'd been in the library since before dawn") que o matcher
+    deslizante (montagem_vertical._casar) consegue casar. Normaliza p/ bater com o Whisper."""
     if not corpo:
         return ""
-    # 1ª frase (até o primeiro . ! ? seguido de espaço) ou a 1ª linha.
-    m = re.search(r"(.+?[.!?])(?:\s|$)", corpo, re.DOTALL)
-    frase = (m.group(1) if m else corpo.splitlines()[0]).strip()
-    palavras = frase.split()
-    if len(palavras) > max_palavras:
-        frase = " ".join(palavras[:max_palavras])
-    return frase
+    # frases a partir do início (cada uma até . ! ?), ou a 1ª linha se não houver pontuação.
+    frases = re.findall(r".+?[.!?](?=\s|$)", corpo, re.DOTALL) or [corpo.splitlines()[0]]
+    acc = []
+    for fr in frases:
+        acc.extend(fr.split())
+        if len(acc) >= min_palavras:
+            break
+    return " ".join(acc[:max_palavras]).strip()
 
 
 def texto_narracao(texto):

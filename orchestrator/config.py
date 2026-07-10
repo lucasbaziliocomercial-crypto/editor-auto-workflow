@@ -162,6 +162,11 @@ DEFAULTS = {
     # (0/1 desliga). ROTEIRO_KB_FADE: fade-preto entre imagens do corpo (0=off; 12 = look long-form).
     "ROTEIRO_KENBURNS_ZOOM": "0.28",
     "ROTEIRO_KENBURNS_PAN": "0.90",
+    # Quantos CORPOS (Ken Burns) renderizar AO MESMO TEMPO. O zoompan do FFmpeg é single-thread, então
+    # em fila cada corpo usa ~2-3 núcleos e sobra CPU — o gargalo da montagem. N em paralelo ocupa os
+    # núcleos livres SEM mudar o output (mesma cadeia de filtros por capítulo). Teto 4 (limite de
+    # sessões NVENC simultâneas em placa consumer). 1 = sequencial (comportamento antigo).
+    "ROTEIRO_CORPO_PARALELO": "3",
     "ROTEIRO_AUDIO_NIVEL": "media",       # limpeza da narração: leve|media|forte|off
     "ROTEIRO_AUDIO_LUFS": "-14",          # loudnorm alvo (padrão da casa)
     "ROTEIRO_AUDIO_TP": "-1.5",           # true peak
@@ -173,7 +178,7 @@ DEFAULTS = {
     "ROTEIRO_TTS_STALE": "regen",         # narration.mp3 mais velho que roteiro.txt: regen|warn|off
     "ROTEIRO_TTS_STALE_TOL": "2",         # folga (s) no mtime p/ evitar falso-positivo
     "ROTEIRO_SYNC_GUARD": "1",            # Etapa 7 falha alto se 0 âncoras casam (0 = desliga)
-    "ROTEIRO_AUTO_REBUILD": "1",          # card já feito re-renderiza se o código de render mudou (0 = idempotência pura)
+    "ROTEIRO_AUTO_REBUILD": "1",          # código mudou desde o artefato: Etapas 3/6/7 refazem sozinhas (local/grátis), 2/4/5 só avisam; 0 = idempotência pura
 }
 
 

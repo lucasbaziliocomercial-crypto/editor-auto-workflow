@@ -4,11 +4,21 @@
 Reproduz a ESTRUTURA que o Romance Maker montava no CapCut, mas RENDERIZA um MP4 headless
 (o pipeline exige out/final.mp4 — sem passo manual no CapCut). Timeline:
 
-    TEASER  →  [capa_1] corpo_1  →  [capa_2] corpo_2  →  …  →  RESUMO P2  →  CTA
+    TEASER → [INTRO PÓS TEASER] → [capa_1] corpo_1 → … → RABO DA ISCA
     └ clipes drop-in mudos, cortados p/ durar o GANCHO falado; narração do gancho por baixo
                     └ corpo = imagens do capítulo (Ken Burns) sincronizadas à narração daquele cap.
                        a capa (Etapa 6) anuncia o capítulo; a narradora DITA "Chapter N — Título"
                        por baixo (covers/titulo_NN.mp3, Etapa 3), com respiro no fim
+
+    RABO DA ISCA (P1), ordem fixa da editora (2026-07-09):
+        INTRO BOOK 02 → RESUMO → CTA → AVISO DE CLONE → TUTORIAL PLATAFORMA → MINUTO FINAL
+    ├ FIXAS por canal (clipes prontos com áudio próprio E LEGENDA PRÓPRIA; pulam se faltarem):
+    │   INTRO PÓS TEASER, INTRO BOOK 02, AVISO DE CLONE, TUTORIAL PLATAFORMA — ver detalhes.py.
+    │   A legenda re-transcrita NÃO é queimada por cima delas (já trazem a própria); a música de
+    │   fundo continua por baixo. Decisão da editora (2026-07-09).
+    └ GERADAS (template fixo, takes trocados pelos do teaser): RESUMO/CTA (resumo_cta.py),
+        MINUTO FINAL (ultimo_minuto.py).
+
     música de fundo (-10 dB) por baixo de tudo.
 
 Como sincroniza: a narração é a espinha. Os limites de cada capítulo na narration.mp3 são
@@ -32,6 +42,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 from common import (ErroPipeline, achar_ffmpeg, SUBPROCESS_FLAGS, parse_srt,
                     materiais_canal, materiais_dirs, ler_modelos, IMG_EXTS)
@@ -379,6 +390,34 @@ def _preparar_ass(ff, srt, maximo, w, h):
     return ass
 
 
+def _drop_dialogos_em_ranges(ass_path, ranges, log):
+    """Remove do .ass os eventos Dialogue cujo INÍCIO cai dentro de qualquer (ini, fim) de
+    `ranges` (em s, na timeline do vídeo MONTADO). Usado p/ NÃO queimar a legenda re-transcrita
+    por cima das PEÇAS FIXAS de detalhe (tutorial, intros, aviso de clone), que já trazem legenda
+    própria embutida — decisão da editora (2026-07-09). Devolve quantos blocos foram removidos."""
+    if not ranges:
+        return 0
+    from ffmpeg_montagem import _t2s
+    txt = ass_path.read_text(encoding="utf-8", errors="replace")
+    out, removidos = [], 0
+    for linha in txt.splitlines():
+        if linha.startswith("Dialogue:"):
+            campos = linha.split(",", 9)
+            if len(campos) == 10:
+                try:
+                    ini = _t2s(campos[1])
+                except (ValueError, IndexError):
+                    ini = None
+                # tolerância de 50ms na fronteira (arredondamento de frames no concat)
+                if ini is not None and any(a - 0.05 <= ini < b for (a, b) in ranges):
+                    removidos += 1
+                    continue
+        out.append(linha)
+    if removidos:
+        ass_path.write_text("\n".join(out), encoding="utf-8")
+    return removidos
+
+
 def _fit(w, h):
     """Filtro de vídeo que enquadra QUALQUER fonte em w×h (cover: preenche e corta)."""
     return ("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1"
@@ -455,23 +494,34 @@ def _boundaries(proj, ff, log):
     tl = _word_timeline(cues, total + 5.0) if cues else []
 
     def _casar(frase, desde):
-        """(índice_na_timeline, tempo) do início da frase-âncora buscando a partir de `desde`, ou
-        None. Desliza a chave das 7 primeiras palavras sobre a timeline e casa se >=~60% baterem
-        (tolerante a erro do Whisper via `_palavra_igual`)."""
-        chave = re.sub(r"[^a-z0-9]+", " ", (frase or "").lower()).split()[:7]
-        if not chave or not tl:
+        """(índice_p/_avançar, tempo_de_início_do_capítulo) da frase-âncora buscando a partir de
+        `desde`, ou None. DESLIZA uma janela de até 7 palavras sobre a âncora INTEIRA (não só as 7
+        primeiras) e casa a 1ª janela que bater >=~60% (tolerante a erro do Whisper via
+        `_palavra_igual`). A abertura (offset 0) é preferida; se ela for curta/genérica e não casar,
+        uma janela mais adiante — o trecho DISTINTIVO da frase (ex.: "...library since before dawn")
+        — ancora, e o offset dela é DESCONTADO p/ voltar ao início real do capítulo. Fecha o furo do
+        card 250 P2 cap 4 ("I knew she'd come down." não ancorava sozinha → capa entrava ~5 min tarde)."""
+        palavras = re.sub(r"[^a-z0-9]+", " ", (frase or "").lower()).split()[:16]
+        if not palavras or not tl:
             return None
-        alvo = max(3, (len(chave) * 3 + 2) // 5)  # ~60% das palavras
-        melhor_j, melhor_sc = None, 0
-        for j in range(desde, len(tl)):
-            sc = sum(1 for p in range(len(chave))
-                     if j + p < len(tl) and _palavra_igual(chave[p], tl[j + p][0]))
-            if sc > melhor_sc:
-                melhor_sc, melhor_j = sc, j
-                if sc == len(chave):
-                    break
-        if melhor_j is not None and melhor_sc >= alvo:
-            return melhor_j, tl[melhor_j][1]
+        for off in range(0, max(1, len(palavras) - 3)):
+            chave = palavras[off:off + 7]
+            if len(chave) < 4:
+                break
+            alvo = max(3, (len(chave) * 3 + 2) // 5)  # ~60% das palavras
+            # a janela aparece `off` palavras DEPOIS do início do capítulo -> busca desde+off.
+            melhor_j, melhor_sc = None, 0
+            for j in range(desde + off, len(tl)):
+                sc = sum(1 for p in range(len(chave))
+                         if j + p < len(tl) and _palavra_igual(chave[p], tl[j + p][0]))
+                if sc > melhor_sc:
+                    melhor_sc, melhor_j = sc, j
+                    if sc == len(chave):
+                        break
+            if melhor_j is not None and melhor_sc >= alvo:
+                j_cap = max(desde, melhor_j - off)   # volta ao INÍCIO do capítulo
+                # avança a busca do PRÓXIMO capítulo p/ depois da janela casada (não re-casa aqui).
+                return melhor_j + len(chave), tl[j_cap][1]
         return None
 
     starts, _desde = {}, 0
@@ -636,6 +686,20 @@ def _kb_fade_frames():
         return max(0, int(float(os.environ.get("ROTEIRO_KB_FADE", "0"))))
     except (TypeError, ValueError):
         return 0
+
+
+def _corpo_paralelo():
+    """Quantos CORPOS (Ken Burns) renderizar AO MESMO TEMPO. O `zoompan` do FFmpeg é single-thread,
+    então em fila cada render usa só ~2-3 núcleos e sobra CPU ociosa — o gargalo da montagem. Rodar
+    N corpos em paralelo ocupa os núcleos livres SEM mudar o output (cada capítulo é a MESMA chamada
+    _kenburns_imagens; muda só o agendamento). Teto 4 por causa do limite de sessões NVENC
+    simultâneas em placas consumer (driver antigo trava em 3). 1 = sequencial (comportamento antigo).
+    Env: ROTEIRO_CORPO_PARALELO (default 3)."""
+    try:
+        v = int(float(os.environ.get("ROTEIRO_CORPO_PARALELO", "3")))
+    except (TypeError, ValueError):
+        v = 3
+    return max(1, min(4, v))
 
 
 def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log):
@@ -1092,13 +1156,19 @@ def _whisper_srt(proj, audio, tmp, log):
     return srt if (srt.exists() and srt.stat().st_size > 0) else None
 
 
-def _legendar(proj, ff, video_montado, tmp, w, h, fps, log, qr_img=None, qr_frag=None):
+def _legendar(proj, ff, video_montado, tmp, w, h, fps, log, qr_img=None, qr_frag=None,
+              mudos_ranges=None):
     """Queima a legenda no vídeo MONTADO. Como a montagem insere capas (silêncio) entre os
     capítulos, a narration.srt original NÃO casa — então RE-TRANSCREVE o áudio já montado
     (Whisper) e a legenda fica perfeitamente sincronizada. Não-fatal (devolve None em falha).
 
     Se `qr_img`+`qr_frag` vierem preenchidos (isca P1 com QR), o QR é sobreposto NA MESMA
     passada de encode — evita reencodar o vídeo inteiro uma 2ª vez só pro QR.
+
+    `mudos_ranges` (lista de (ini, fim) em s, timeline do vídeo montado): trechos onde a legenda
+    NÃO deve ser queimada — as PEÇAS FIXAS de detalhe (tutorial, intros, aviso de clone) já trazem
+    legenda própria embutida, então os blocos re-transcritos que caem nesses intervalos são
+    descartados (decisão da editora 2026-07-09), evitando legenda dupla.
 
     Roda o filtro `subtitles` com cwd=tmp e nomes RELATIVOS p/ evitar o escaping do `:` do
     Windows nos caminhos."""
@@ -1115,6 +1185,13 @@ def _legendar(proj, ff, video_montado, tmp, w, h, fps, log, qr_img=None, qr_frag
     style = _legenda_style(w, h)
     maximo = _caption_max_chars()
     ass = _preparar_ass(ff, srt, maximo, w, h)  # UMA linha só (≤ maximo), padrão long form
+    # Peças com legenda própria (tutorial/intros/aviso de clone): dropa os blocos re-transcritos
+    # que caem no intervalo delas — a legenda embutida do clipe fica, sem legenda dupla por cima.
+    if mudos_ranges:
+        n_rm = _drop_dialogos_em_ranges(ass, mudos_ranges, log)
+        if n_rm:
+            log("    legenda: %d bloco(s) suprimido(s) nas peças de legenda própria "
+                "(tutorial/intros/aviso de clone)." % n_rm)
     # fontsdir: copia o .ttf da fonte da legenda pra uma subpasta e aponta o libass PRA ELA —
     # garante que a serifa (Times New Roman etc.) resolva mesmo em builds sem fontconfig do sistema.
     fontsdir_frag = ""
@@ -1235,9 +1312,38 @@ def construir(proj, log, cancel=None, parte=None):
             imgs_por_cap[caps[i % ncaps]["n"]].append(img)
 
     segmentos = []  # lista de MP4 finais (vídeo+áudio) na ordem
+    detalhe_segs = set()  # peças fixas (tutorial/intros/aviso de clone) — sem legenda queimada
 
     def _seg_path(nome):
         return tmp / ("seg_%s.mp4" % nome)
+
+    def _seg_detalhe(nome, key):
+        """Segmento de uma PEÇA FIXA de detalhe do canal (intro pós-teaser, INTRO BOOK 02,
+        AVISO DE CLONE, TUTORIAL PLATAFORMA). Acha o clipe pronto do canal (detalhes.achar:
+        por-vídeo > canal > herdado), enquadra em w×h e MANTÉM o áudio próprio do clipe (são
+        vídeos finalizados). None se a peça não existe — o rabo só encolhe (sem drop-in genérico).
+        Idempotente por segmento (reaproveita o seg_*.mp4 se mais novo que o clipe-fonte)."""
+        import detalhes
+        alvo = detalhes.achar(proj, mat_dirs, key)
+        if not alvo:
+            return None
+        s = _seg_path(nome)
+        detalhe_segs.add(s)  # peça de legenda própria: não recebe legenda queimada por cima
+        if _seg_fresco(s, alvo):
+            return s
+        if _tem_audio(ff, alvo):
+            _video_ajustado(ff, alvo, None, w, h, fps, s, log, mudo=False)
+        else:
+            vmudo = tmp / ("_v_%s.mp4" % nome)
+            _video_ajustado(ff, alvo, None, w, h, fps, vmudo, log, mudo=True)
+            aud = tmp / ("_a_%s.m4a" % nome)
+            _silencio(ff, _dur(ff, vmudo), aud, log)
+            _mux(ff, vmudo, aud, s, log)
+            vmudo.unlink(missing_ok=True); aud.unlink(missing_ok=True)
+        if s.exists() and s.stat().st_size > 0:
+            log("    detalhe '%s': %s (%.1fs)." % (key, alvo.name, _dur(ff, s)))
+            return s
+        return None
 
     # --- 1) TEASER (gancho) — SÓ na isca (P1). A extensão (P2) começa direto no cap 1. -----
     if extensao:
@@ -1267,11 +1373,24 @@ def construir(proj, log, cancel=None, parte=None):
             vmudo.unlink(missing_ok=True); aud.unlink(missing_ok=True)
         segmentos.append(seg)
 
+        # INTRO PÓS TEASER (peça fixa do canal): abertura entre o teaser e o cap 1. Pulada se
+        # o canal não tiver o clipe. Só na isca (P1). Ver detalhes.py.
+        ipt = _seg_detalhe("01_intro_pos_teaser", "intro_pos_teaser")
+        if ipt:
+            segmentos.append(ipt); log("    INTRO PÓS TEASER adicionada.")
+
     # --- 2) CAPÍTULOS ---------------------------------------------------------
+    # Os corpos (Ken Burns/zoompan) são o gargalo: o zoompan é single-thread, então em fila sobra
+    # CPU ociosa. Renderizamos ATÉ _corpo_paralelo() capítulos AO MESMO TEMPO — o output é idêntico
+    # (a MESMA chamada _kenburns_imagens por capítulo; muda só o agendamento) e os segmentos são
+    # montados DEPOIS, na ordem dos capítulos, então o paralelismo não bagunça a sequência final.
     capa_pos = _capa_pos()
-    for idx, c in enumerate(caps):
+
+    def _render_cap(idx, c):
+        """Renderiza capa+corpo de UM capítulo (roda em thread própria). Devolve (idx, capa, corpo, msg).
+        Todas as variáveis do capítulo (n/ini/fim/capa) são LOCAIS — não há captura tardia de loop."""
         if cancel is not None and cancel.is_set():
-            raise ErroPipeline("Cancelado pelo usuário.")
+            return (idx, None, None, None)
         n = c["n"]
         # Na extensão (P2) não há teaser, então o 1º capítulo começa em 0 (não perde a narração
         # do trecho que, na isca, iria por baixo do teaser).
@@ -1319,12 +1438,39 @@ def construir(proj, log, cancel=None, parte=None):
 
         capa_seg = _seg_capa()
         corpo_seg = _seg_corpo()
+        msg = "    capítulo %d: %.1fs de corpo%s." % (
+            n, ((fim or total) - ini), ", com capa" if capa_seg else " (sem capa)")
+        return (idx, capa_seg, corpo_seg, msg)
+
+    _nparal = _corpo_paralelo()
+    _res = {}
+    if _nparal > 1 and len(caps) > 1:
+        log("    corpos em paralelo: até %d capítulo(s) por vez (zoompan é single-thread)." % _nparal)
+        with ThreadPoolExecutor(max_workers=_nparal) as _ex:
+            for _idx, _capa, _corpo, _msg in _ex.map(lambda ic: _render_cap(*ic),
+                                                     list(enumerate(caps))):
+                _res[_idx] = (_capa, _corpo, _msg)
+    else:
+        for _idx, _c in enumerate(caps):
+            if cancel is not None and cancel.is_set():
+                raise ErroPipeline("Cancelado pelo usuário.")
+            _i, _capa, _corpo, _msg = _render_cap(_idx, _c)
+            _res[_i] = (_capa, _corpo, _msg)
+
+    if cancel is not None and cancel.is_set():
+        raise ErroPipeline("Cancelado pelo usuário.")
+
+    # Monta os segmentos NA ORDEM dos capítulos — o paralelismo mexe só no tempo de render, não na
+    # sequência. As mensagens por-capítulo também saem aqui, em ordem (durante o render elas se
+    # intercalariam por serem concorrentes).
+    for _idx in range(len(caps)):
+        capa_seg, corpo_seg, _msg = _res[_idx]
         ordem = [capa_seg, corpo_seg] if capa_pos == "antes" else [corpo_seg, capa_seg]
         for s in ordem:
             if s is not None:
                 segmentos.append(s)
-        log("    capítulo %d: %.1fs de corpo%s." % (
-            n, ((fim or total) - ini), ", com capa" if capa_seg else " (sem capa)"))
+        if _msg:
+            log(_msg)
 
     # --- 3) RESUMO P2 + CTA (drop-in) ----------------------------------------
     def _drop_seg(nome, subpasta, modelo_key, proj_stem=None):
@@ -1360,28 +1506,37 @@ def construir(proj, log, cancel=None, parte=None):
         return s
 
     if extensao:
-        log("    P2 (extensão): sem resumo P2 nem CTA (só capas + corpo).")
+        log("    P2 (extensão): sem rabo de isca (só capas + corpo).")
     else:
-        # GERAÇÃO (2026-07-09): resumo P2 e CTA são gerados reusando os clipes do teaser (Veo)
-        # como visual — mesma referência, cenas sempre diferentes. Só cai no drop-in legado
-        # (_drop_seg) se a geração não for possível (sem teaser, sem texto de resumo, sem base
-        # de CTA). Ver resumo_cta.py.
+        # RABO DA ISCA (P1) — ordem fixa (decisão da editora 2026-07-09):
+        #   INTRO BOOK 02 → RESUMO → CTA → AVISO DE CLONE → TUTORIAL PLATAFORMA → MINUTO FINAL
+        # PEÇAS FIXAS por canal (clipes prontos, áudio próprio, pulam se faltarem): INTRO BOOK 02,
+        # AVISO DE CLONE, TUTORIAL PLATAFORMA (ver detalhes.py). PEÇAS GERADAS (mantêm o template,
+        # trocam só os takes pelos do teaser, duplicando se faltar clipe): RESUMO e CTA
+        # (resumo_cta.py) e MINUTO FINAL (ultimo_minuto.py). Só a ORDEM/posição mudou.
         import resumo_cta
         teaser_clips = _teaser_clips()   # já sem a marca 'Veo' (memoizado)
 
+        # INTRO BOOK 02 (fixa) ------------------------------------------------
+        book2 = _seg_detalhe("80_intro_book_02", "intro_book_02")
+        if book2:
+            segmentos.append(book2); log("    INTRO BOOK 02 adicionada.")
+
+        # RESUMO (gerado: template + takes do teaser) -------------------------
         resumo = None
         try:
             resumo = resumo_cta.construir_resumo_p2(proj, base_mat, teaser_clips, w, h, fps, tmp, log, cancel)
         except Exception as e:
-            log("    ⚠ resumo P2 (geração) falhou (%s) — tentando drop-in." % e)
+            log("    ⚠ resumo (geração) falhou (%s) — tentando drop-in." % e)
         if not resumo:
             resumo = _drop_seg("90_resumo", "book2", "resumo_p2", proj_stem="resumo_p2")
         if resumo:
-            segmentos.append(resumo); log("    resumo P2 adicionado (%s)." % resumo.name)
+            segmentos.append(resumo); log("    RESUMO adicionado (%s)." % resumo.name)
         else:
-            log("    (sem resumo P2 — sem clipes de teaser + texto no roteiro, e sem drop-in em "
+            log("    (sem RESUMO — sem clipes de teaser + texto no roteiro, e sem drop-in em "
                 "materiais/%s/book2/)." % base_mat.name)
 
+        # CTA (gerado: template + takes do teaser) ---------------------------
         cta = None
         try:
             cta = resumo_cta.construir_cta(proj, base_mat, modelos, teaser_clips, w, h, fps, tmp, log, cancel)
@@ -1390,27 +1545,52 @@ def construir(proj, log, cancel=None, parte=None):
         if not cta:
             cta = _drop_seg("91_cta", "cta", "cta_final")
         if cta:
-            segmentos.append(cta); log("    CTA final adicionada.")
+            segmentos.append(cta); log("    CTA adicionada.")
         else:
             log("    (sem CTA — sem clipes de teaser + base cta_base.mp4 em materiais/%s/cta/, e "
                 "sem drop-in/modelo cta_final)." % base_mat.name)
 
-        # ÚLTIMO MINUTO (retenção pós-CTA): tela de comentários + card "Part 2" com os clipes do
-        # teaser tocando no quadrado, ~1 min. Só na isca (P1). Ver ultimo_minuto.py.
+        # AVISO DE CLONE (fixa) ----------------------------------------------
+        aviso = _seg_detalhe("92_aviso_clone", "aviso_clone")
+        if aviso:
+            segmentos.append(aviso); log("    AVISO DE CLONE adicionado.")
+
+        # TUTORIAL PLATAFORMA (fixa) -----------------------------------------
+        tut = _seg_detalhe("93_tutorial_plataforma", "tutorial_plataforma")
+        if tut:
+            segmentos.append(tut); log("    TUTORIAL PLATAFORMA adicionado.")
+
+        # MINUTO FINAL (gerado: retenção pós-CTA — tela de comentários + card "Part 2" com os
+        # clipes do teaser tocando no quadrado, ~1 min). Ver ultimo_minuto.py.
         try:
             import ultimo_minuto
             um = ultimo_minuto.construir_ultimo_minuto(
                 proj, base_mat, teaser_clips, w, h, fps, tmp, log, cancel)
             if um:
-                segmentos.append(um); log("    último minuto adicionado (%s)." % um.name)
+                segmentos.append(um); log("    MINUTO FINAL adicionado (%s)." % um.name)
         except Exception as e:
-            log("    ⚠ último minuto (geração) falhou (%s) — seguindo sem." % e)
+            log("    ⚠ MINUTO FINAL (geração) falhou (%s) — seguindo sem." % e)
 
     # --- 4) CONCAT dos segmentos ---------------------------------------------
     segmentos = [s for s in segmentos if s and s.exists() and s.stat().st_size > 0]
     if not segmentos:
         raise ErroPipeline("Nenhum segmento montado — verifique narração/imagens.")
     concat = _concat_segmentos(ff, segmentos, tmp, fps, log)
+
+    # Faixas (ini, fim) das PEÇAS FIXAS de detalhe na timeline concatenada — a legenda queimada
+    # é SUPRIMIDA nelas (já trazem legenda própria embutida). Offset = soma das durações dos
+    # segmentos na ordem; casa com a timeline do concat (a legenda é re-transcrita do concat).
+    mudos_ranges = []
+    if detalhe_segs:
+        off = 0.0
+        for s in segmentos:
+            d = _dur(ff, s)
+            if s in detalhe_segs:
+                mudos_ranges.append((off, off + d))
+            off += d
+        if mudos_ranges:
+            log("    legenda: %d peça(s) de legenda própria protegida(s) (sem legenda queimada)."
+                % len(mudos_ranges))
 
     # --- 5) LEGENDA (+ QR fundido) — re-transcrita p/ casar com cortes/pausas --
     # O QR fixo da ISCA (P1) é resolvido ANTES e, quando há legenda, entra NA MESMA passada de
@@ -1431,7 +1611,8 @@ def construir(proj, log, cancel=None, parte=None):
     legendou = False
     if _legenda_on():
         try:
-            capd = _legendar(proj, ff, concat, tmp, w, h, fps, log, qr_img=qr_img, qr_frag=qr_frag)
+            capd = _legendar(proj, ff, concat, tmp, w, h, fps, log, qr_img=qr_img, qr_frag=qr_frag,
+                             mudos_ranges=mudos_ranges)
             if capd:
                 video_src = capd
                 legendou = True
