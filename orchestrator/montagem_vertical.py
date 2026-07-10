@@ -4,15 +4,18 @@
 Reproduz a ESTRUTURA que o Romance Maker montava no CapCut, mas RENDERIZA um MP4 headless
 (o pipeline exige out/final.mp4 — sem passo manual no CapCut). Timeline:
 
-    TEASER → [INTRO PÓS TEASER] → [capa_1] corpo_1 → PRETO → [capa_2] → PRETO → corpo_2 → … → RABO DA ISCA
+    TEASER → [INTRO PÓS TEASER] → ⬛ capa_1 ⬛ corpo_1 ⬛ capa_2 ⬛ corpo_2 ⬛ … ⬛ RABO DA ISCA(⬛ entre peças)
     └ clipes drop-in mudos, cortados p/ durar o GANCHO falado; narração do gancho por baixo
                     └ corpo = imagens do capítulo (Ken Burns) sincronizadas à narração daquele cap.
                        ENTRE as imagens do corpo há um DISSOLVE (crossfade) suave (_corpo_xfade, ~0.4s);
-                       o teaser NÃO leva dissolve (corte seco). A cada TROCA de capítulo há uma TELA
-                       PRETA de respiro ANTES e DEPOIS da capa (_blackgap_dur, ~2s; a música global
-                       segue por baixo) — a editora achou os cortes "secos" (2026-07-10). O preto
-                       antes da 1ª capa é pulado. a capa (Etapa 6) anuncia o capítulo; a narradora
-                       DITA "Chapter N — Título" por baixo (covers/titulo_NN.mp3, Etapa 3), c/ respiro
+                       o teaser NÃO leva dissolve (corte seco). ⬛ = TELA PRETA de respiro (~1s,
+                       _blackgap_dur) entre TODA transição de segmento DO 1º CAPÍTULO EM DIANTE — capa,
+                       corpo E peças do rabo (a editora achou os cortes "secos", prints da timeline
+                       2026-07-10). O teaser/intro (antes da 1ª capa) FLUI sem preto; nunca há preto no
+                       arranque absoluto. A música global segue por baixo do preto. As bordas de capa
+                       e corpo fazem fade ←/→ preto (_blackgap_fade, ~0.3s) p/ o dip não ser seco. a
+                       capa (Etapa 6) anuncia o capítulo; a narradora DITA "Chapter N — Título" por
+                       baixo (covers/titulo_NN.mp3, Etapa 3), c/ respiro
 
     RABO DA ISCA (P1), ordem fixa da editora (2026-07-09):
         INTRO BOOK 02 → RESUMO → CTA → AVISO DE CLONE → TUTORIAL PLATAFORMA → MINUTO FINAL
@@ -187,6 +190,34 @@ def _blackgap_dur():
         return max(0.0, float(v))
     except (TypeError, ValueError):
         return 1.0
+
+
+def _blackgap_fade():
+    """Fade suave (s) de entrada/saída do PRETO da troca: as CENAS ao redor (capa e corpo) fazem
+    fade-out→preto e fade-in←preto nas bordas, então o dip pro preto não é um corte seco (pedido da
+    editora 2026-07-10: 'transições suaves entre elas'). Aplicado DENTRO do render de cada capa/corpo
+    (passada única, custo ~zero). Só vale se o blackgap estiver ligado. Default 0.3s; 0/off = corte
+    seco no preto. Env: ROTEIRO_BLACKGAP_FADE."""
+    if _blackgap_dur() <= 0:
+        return 0.0
+    v = os.environ.get("ROTEIRO_BLACKGAP_FADE", "0.3").strip().lower()
+    if v in ("0", "off", "none", "nao", "não", "no", "false", ""):
+        return 0.0
+    try:
+        return max(0.0, float(v))
+    except (TypeError, ValueError):
+        return 0.3
+
+
+def _fim_cenas_n():
+    """Quantas CENAS ANIMADAS (clipes do teaser) fecham o book 2 (P2), pra não terminar seco
+    (pedido da editora 2026-07-10: 'umas duas cenas animadas … com a música de fundo suave'). As
+    cenas entram sem narração — só o leito de música global por baixo. 0 = sem fecho. Default 2.
+    Env: ROTEIRO_FIM_CENAS."""
+    try:
+        return max(0, int(float(os.environ.get("ROTEIRO_FIM_CENAS", "2"))))
+    except (TypeError, ValueError):
+        return 2
 
 
 # ---------------------------------------------------------------------------
@@ -781,7 +812,24 @@ def _corpo_paralelo():
     return max(1, min(4, v))
 
 
-def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log):
+def _fade_edges_suffix(fc, mapa, dur, fade_edges):
+    """Anexa fade-in←preto (início) e fade-out→preto (fim) ao stream final `mapa` de um filter_complex
+    `fc`, p/ suavizar o dip pro preto da troca (ver _blackgap_fade). Devolve (fc, mapa) novos; no-op
+    se fade_edges vazio. Durações limitadas a dur/2 (não passam da metade da cena)."""
+    fin, fout = fade_edges if fade_edges else (0.0, 0.0)
+    fin = min(max(0.0, fin), dur / 2.0)
+    fout = min(max(0.0, fout), dur / 2.0)
+    if fin <= 0.01 and fout <= 0.01:
+        return fc, mapa
+    parts = []
+    if fin > 0.01:
+        parts.append("fade=t=in:st=0:d=%.3f:color=black" % fin)
+    if fout > 0.01:
+        parts.append("fade=t=out:st=%.3f:d=%.3f:color=black" % (max(0.0, dur - fout), fout))
+    return fc + ";" + mapa + ",".join(parts) + "[vfade]", "[vfade]"
+
+
+def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log, fade_edges=(0.0, 0.0)):
     """Slideshow com Ken Burns DINÂMICO: N imagens dividindo `dur` igualmente; cada imagem faz um
     movimento CONTÍNUO (zoom-in/-out + pan) que dura a cena inteira e varia por imagem (presets
     _KB_MODES, ciclados por índice). Vídeo MUDO. Uma passada (filter_complex).
@@ -789,7 +837,10 @@ def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log):
     Entre as cenas há um CROSSFADE (dissolve) suave de _corpo_xfade() s — as imagens se FUNDEM em
     vez do corte seco (pedido da editora 2026-07-10). Cada imagem é alongada em (n-1)/n·xfade p/ que,
     depois das n-1 sobreposições, o slideshow continue com EXATAMENTE `dur` (o áudio é a espinha).
-    Sem xfade (ou cenas curtas / 1 imagem) cai no `concat` seco de antes."""
+    Sem xfade (ou cenas curtas / 1 imagem) cai no `concat` seco de antes.
+
+    `fade_edges`=(fin, fout): fade-in←preto no início e fade-out→preto no fim do slideshow (borda do
+    corpo contra a tela preta da troca — ver _blackgap_fade). (0,0) = sem fade (ex.: teaser)."""
     imgs = [i for i in imgs if Path(i).exists()]
     if not imgs:
         return _tela_cor(ff, dur, w, h, fps, out, log)
@@ -843,6 +894,7 @@ def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log):
         return ";".join(filtros) + ";" + ";".join(chain), prev
 
     fc, mapa = (_fc_xfade() if usar_xf else _fc_concat())
+    fc, mapa = _fade_edges_suffix(fc, mapa, dur, fade_edges)   # fade-in/out ←/→ preto (bordas)
     cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", *inputs,
            "-filter_complex", fc, "-map", mapa, *_venc_args(fps), "-an", str(out)]
     _run(cmd, log, "kenburns")
@@ -869,8 +921,9 @@ def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log):
             filtros2.append("[%d:v]%s[v%d]" % (k, ",".join(ch), k))
             labels2.append("[v%d]" % k)
         fc2 = ";".join(filtros2) + ";" + "".join(labels2) + "concat=n=%d:v=1:a=0[v]" % n
+        fc2, mapa2 = _fade_edges_suffix(fc2, "[v]", dur, fade_edges)
         _run([ff, "-y", "-hide_banner", "-loglevel", "error", *inputs2,
-              "-filter_complex", fc2, "-map", "[v]", *_venc_args(fps), "-an", str(out)],
+              "-filter_complex", fc2, "-map", mapa2, *_venc_args(fps), "-an", str(out)],
              log, "kenburns-concat")
     return out.exists() and out.stat().st_size > 0
 
@@ -883,12 +936,25 @@ def _tela_cor(ff, dur, w, h, fps, out, log, cor="black"):
     return out.exists() and out.stat().st_size > 0
 
 
-def _video_ajustado(ff, src, dur, w, h, fps, out, log, mudo=True):
-    """Enquadra um vídeo drop-in em w×h e (opcional) corta em `dur`. mudo=True remove o áudio."""
+def _video_ajustado(ff, src, dur, w, h, fps, out, log, mudo=True, fade=None):
+    """Enquadra um vídeo drop-in em w×h e (opcional) corta em `dur`. mudo=True remove o áudio.
+
+    `fade`=(fin, fout, total): fade-in←preto no início e fade-out→preto no fim (SÓ no vídeo, o áudio
+    não é tocado) — usado nas bordas da CAPA contra a tela preta da troca (ver _blackgap_fade). None
+    = sem fade. `total` é a duração-alvo do clipe (p/ posicionar o fade-out)."""
     cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src)]
     if dur is not None:
         cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-t", "%.3f" % dur, "-i", str(src)]
-    cmd += ["-vf", _fit(w, h), *_venc_args(fps)]
+    vf = _fit(w, h)
+    if fade is not None:
+        fin, fout, total = fade
+        fin = min(max(0.0, fin or 0.0), total / 2.0)
+        fout = min(max(0.0, fout or 0.0), total / 2.0)
+        if fin > 0.01:
+            vf += ",fade=t=in:st=0:d=%.3f:color=black" % fin
+        if fout > 0.01:
+            vf += ",fade=t=out:st=%.3f:d=%.3f:color=black" % (max(0.0, total - fout), fout)
+    cmd += ["-vf", vf, *_venc_args(fps)]
     cmd += (["-an"] if mudo else [*_AENC])
     cmd += [str(out)]
     _run(cmd, log, "video-ajustado")
@@ -1513,9 +1579,31 @@ def construir(proj, log, cancel=None, parte=None):
             return s
         return None
 
-    # --- 1) TEASER (gancho) — SÓ na isca (P1). A extensão (P2) começa direto no cap 1. -----
+    # --- 1) TEASER (gancho) — SÓ na isca (P1). A extensão (P2) abre com a CENA ANIMADA. -----
     if extensao:
         log("    P2 (extensão): sem teaser-isca — o capítulo 1 começa do 0.")
+        # ABERTURA do book 2 (2026-07-10): o thumbnail do card ANIMADO (image->video por IA, ou um
+        # clipe que a editora largou em projects/<slug>/abertura/). Entra como 1º segmento; o passe
+        # de TELA PRETA insere sozinho o respiro entre a abertura e a capa 1 (dentro=True só na capa).
+        # Sem clipe/insumo/crédito, abertura.garantir_clip devolve None → P2 abre direto na capa (como antes).
+        ab_clip = None
+        try:
+            import abertura
+            ab_clip = abertura.garantir_clip(proj, log, cancel)
+        except Exception as e:
+            log("    ⚠ abertura: %s — seguindo sem abertura." % e)
+        if ab_clip:
+            seg = _seg_path("00_abertura")
+            if not _seg_fresco(seg, Path(ab_clip)):
+                vmudo = tmp / "_v_abertura.mp4"
+                _video_ajustado(ff, ab_clip, None, w, h, fps, vmudo, log, mudo=True)
+                aud = tmp / "_a_abertura.m4a"
+                _silencio(ff, _dur(ff, vmudo), aud, log)   # sem narração; a música global cobre
+                _mux(ff, vmudo, aud, seg, log)
+                vmudo.unlink(missing_ok=True); aud.unlink(missing_ok=True)
+            if seg.exists() and seg.stat().st_size > 0:
+                segmentos.append(seg)
+                log("    ABERTURA (thumbnail animado) adicionada (%.1fs)." % _dur(ff, seg))
     else:
         hook_dur = max(1.0, bnds[0]) if bnds else min(8.0, total)
         # Teaser é POR VÍDEO: lê de projects/<slug>/teaser/ (isolado deste card). Só cai no
@@ -1575,7 +1663,12 @@ def construir(proj, log, cancel=None, parte=None):
             if not (capa.exists() and capa.stat().st_size > 0):
                 return None
             vmudo = tmp / ("_v_capa_%02d.mp4" % n)
-            _video_ajustado(ff, capa, None, w, h, fps, vmudo, log, mudo=True)
+            # bordas da capa fazem fade ←/→ preto (contra a tela preta da troca). Sem trim (dur=None),
+            # a duração de saída = a da fonte, então _dur(capa) posiciona o fade-out. (0,0)=desligado.
+            _fe = _blackgap_fade()
+            _cap_total = _dur(ff, capa)
+            _video_ajustado(ff, capa, None, w, h, fps, vmudo, log, mudo=True,
+                            fade=((_fe, _fe, _cap_total) if _fe > 0 and _cap_total > 0 else None))
             dur = _dur(ff, vmudo)
             aud = tmp / ("_a_capa_%02d.m4a" % n)
             # A capa toca a narração do título ("Chapter N — Título", Etapa 3) por baixo — a
@@ -1602,7 +1695,10 @@ def construir(proj, log, cancel=None, parte=None):
             dur = (fim - ini) if fim is not None else (total - ini)
             dur = max(1.0, dur)
             vmudo = tmp / ("_v_corpo_%02d.mp4" % n)
-            _kenburns_imagens(ff, imgs_por_cap.get(n, []) or todas_imgs, dur, w, h, fps, vmudo, log)
+            # bordas do corpo fazem fade ←/→ preto (contra a tela preta da troca); (0,0) se desligado
+            _fe = _blackgap_fade()
+            _kenburns_imagens(ff, imgs_por_cap.get(n, []) or todas_imgs, dur, w, h, fps, vmudo, log,
+                              fade_edges=(_fe, _fe))
             # o vídeo pode sair um tico maior/menor que dur (arredondamento de frames);
             # a fatia de áudio manda — usamos -shortest no mux.
             aud = tmp / ("_a_corpo_%02d.m4a" % n)
@@ -1637,42 +1733,16 @@ def construir(proj, log, cancel=None, parte=None):
 
     # Monta os segmentos NA ORDEM dos capítulos — o paralelismo mexe só no tempo de render, não na
     # sequência. As mensagens por-capítulo também saem aqui, em ordem (durante o render elas se
-    # intercalariam por serem concorrentes).
-    #
-    # TELA PRETA de respiro em volta da CAPA (troca de capítulo): a capa fica emoldurada por preto
-    # dos dois lados — ...corpo → PRETO → capa → PRETO → corpo... O preto ANTES da 1ª capa é pulado
-    # (ela já vem logo depois do teaser/intro; a editora não quis respiro no arranque do cap 1).
-    blk = _blackgap_seg()
-    _n_pretos = 0
-
-    def _add(seg):
-        nonlocal _n_pretos
-        if seg is not None:
-            segmentos.append(seg)
-            if seg is blk:
-                _n_pretos += 1
-
+    # intercalariam por serem concorrentes). A TELA PRETA de respiro entre segmentos é inserida
+    # DEPOIS, numa passada única (ver "TELA PRETA" antes do concat) — aqui só empilhamos capa+corpo.
     for _idx in range(len(caps)):
         capa_seg, corpo_seg, _msg = _res[_idx]
-        if capa_pos == "antes":
-            if capa_seg is not None and _idx > 0:
-                _add(blk)                    # PRETO antes da capa (só cap 2..N)
-            _add(capa_seg)
-            if capa_seg is not None:
-                _add(blk)                    # PRETO depois da capa (antes do corpo)
-            _add(corpo_seg)
-        else:  # capa fecha o capítulo (ROTEIRO_CAPA_POS=depois)
-            _add(corpo_seg)
-            if capa_seg is not None:
-                _add(blk)                    # PRETO antes da capa de fechamento
-            _add(capa_seg)
-            if capa_seg is not None and _idx < len(caps) - 1:
-                _add(blk)                    # PRETO depois (antes do próximo corpo)
+        ordem = [capa_seg, corpo_seg] if capa_pos == "antes" else [corpo_seg, capa_seg]
+        for s in ordem:
+            if s is not None:
+                segmentos.append(s)
         if _msg:
             log(_msg)
-    if blk is not None and _n_pretos:
-        log("    tela preta de troca de capítulo: %d respiro(s) de %.1fs (antes/depois das capas)."
-            % (_n_pretos, _blackgap_dur()))
 
     # --- 3) RESUMO P2 + CTA (drop-in) ----------------------------------------
     def _drop_seg(nome, subpasta, modelo_key, proj_stem=None):
@@ -1709,6 +1779,30 @@ def construir(proj, log, cancel=None, parte=None):
 
     if extensao:
         log("    P2 (extensão): sem rabo de isca (só capas + corpo).")
+        # CENAS FINAIS do book 2 (2026-07-10): 'umas duas cenas animadas' reaproveitando os clipes
+        # do teaser (mesmos personagens), pra não terminar seco. Sem narração — só o leito de música
+        # global por baixo ('música suave'). O passe de TELA PRETA insere o respiro preto antes/entre
+        # elas. Clipes ciclam se houver menos que o pedido. Sem teaser → fecho pulado (como antes).
+        n_fim = _fim_cenas_n()
+        fim_clips = _teaser_clips() if n_fim > 0 else []
+        if n_fim > 0 and fim_clips:
+            usados = 0
+            for k in range(n_fim):
+                clip = fim_clips[k % len(fim_clips)]
+                seg = _seg_path("zz_fim_%02d" % (k + 1))
+                if not _seg_fresco(seg, Path(clip)):
+                    vmudo = tmp / ("_v_fim_%02d.mp4" % (k + 1))
+                    _video_ajustado(ff, clip, None, w, h, fps, vmudo, log, mudo=True)
+                    aud = tmp / ("_a_fim_%02d.m4a" % (k + 1))
+                    _silencio(ff, _dur(ff, vmudo), aud, log)
+                    _mux(ff, vmudo, aud, seg, log)
+                    vmudo.unlink(missing_ok=True); aud.unlink(missing_ok=True)
+                if seg.exists() and seg.stat().st_size > 0:
+                    segmentos.append(seg); usados += 1
+            if usados:
+                log("    CENAS FINAIS: %d cena(s) animada(s) do teaser no fecho (música por baixo)." % usados)
+        elif n_fim > 0:
+            log("    (sem CENAS FINAIS — sem clipes de teaser em projects/<slug>/teaser/.)")
     else:
         # RABO DA ISCA (P1) — ordem fixa (decisão da editora 2026-07-09):
         #   INTRO BOOK 02 → RESUMO → CTA → AVISO DE CLONE → TUTORIAL PLATAFORMA → MINUTO FINAL
@@ -1777,6 +1871,28 @@ def construir(proj, log, cancel=None, parte=None):
     segmentos = [s for s in segmentos if s and s.exists() and s.stat().st_size > 0]
     if not segmentos:
         raise ErroPipeline("Nenhum segmento montado — verifique narração/imagens.")
+
+    # TELA PRETA de respiro (~_blackgap_dur() s) entre segmentos, numa passada única (decisão da
+    # editora 2026-07-10, confirmada pelos prints da timeline: os cortes estavam 'secos'). Regra:
+    # DO 1º CAPÍTULO EM DIANTE, toda transição entre segmentos leva 1s de preto — capa↔corpo,
+    # corpo↔capa E as peças do rabo (INTRO BOOK 02, RESUMO, CTA, AVISO, TUTORIAL, MINUTO FINAL).
+    # O teaser/intro (tudo ANTES da 1ª capa) FLUI sem preto (abertura punchy). Nunca há preto no
+    # arranque absoluto do vídeo (P2 começa na capa 1 sem respiro na frente). A música global entra
+    # por baixo do preto no mix final → respiro COM trilha. As bordas de capa/corpo fazem fade
+    # pro/do preto (_blackgap_fade) p/ o dip não ser seco; as peças do rabo entram com corte no preto.
+    blk = _blackgap_seg()
+    if blk is not None:
+        novos, dentro, n_pretos = [], False, 0
+        for s in segmentos:
+            if not dentro and "_capa" in s.name:
+                dentro = True                       # chegou o 1º capítulo: liga os respiros
+            if dentro and novos:                    # preto ANTES deste seg (menos no 1º da região)
+                novos.append(blk); n_pretos += 1
+            novos.append(s)
+        segmentos = novos
+        log("    tela preta de respiro: %d corte(s) de %.1fs entre os segmentos (fade %.1fs)."
+            % (n_pretos, _blackgap_dur(), _blackgap_fade()))
+
     concat = _concat_segmentos(ff, segmentos, tmp, fps, log)
 
     # Faixas (ini, fim) das PEÇAS FIXAS de detalhe na timeline concatenada — a legenda queimada
