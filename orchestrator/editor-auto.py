@@ -828,13 +828,17 @@ class App:
                           pular_gates=self.v_gates.get(), refazer=True))
 
     def continuar(self):
-        """Retoma a última rodada de onde parou. A esteira é idempotente por etapa
-        (pula o artefato-âncora já existente), então isto NUNCA refaz o que ficou pronto."""
+        """Retoma a última rodada de onde parou — inclusive na PARTE certa: se o erro caiu na P2,
+        _fim_run já encolheu ultima_run["partes"] p/ [p2], então o Continuar começa DIRETO na P2
+        (não re-roda a P1). Dentro da parte, a esteira é idempotente por etapa (pula o
+        artefato-âncora já existente), então nada do que ficou pronto é refeito."""
         if not self.ultima_run:
             self._log("Nada para continuar — rode uma vez primeiro."); return
         params = dict(self.ultima_run)
         params["refazer"] = False   # continuar jamais limpa artefatos já concluídos
-        self._log("▶▶ Continuando de onde parou (etapas já concluídas serão puladas)…")
+        partes = params.get("partes") or []
+        onde = " → ".join(p.upper() for p in partes) if partes else "?"
+        self._log("▶▶ Continuando de onde parou (%s; etapas já concluídas serão puladas)…" % onde)
         self._lancar(params)
 
     def _lancar(self, params):
@@ -844,11 +848,15 @@ class App:
         self.b_continuar.config(state="disabled")
         self.b_refazer.config(state="disabled")
         self.b_parar.config(state="normal")
-        partes = params["partes"]
+        partes = list(params["partes"])
 
         def worker():
             interrompido = False
             proj_final = None
+            # `restantes` = partes que AINDA não fecharam. Uma parte só sai daqui quando conclui
+            # com sucesso; se o erro (ou o Parar) cai na P2, a P1 já saiu e o Continuar retoma
+            # DIRETO na P2 — nunca "volta pra P1". É o que alimenta self.ultima_run["partes"].
+            restantes = list(partes)
             try:
                 for pt in partes:
                     if self.cancel.is_set():
@@ -861,6 +869,7 @@ class App:
                                       slug=params["slug"], card_id=params["card"],
                                       categoria=params["categoria"], parte=pt,
                                       pular_gates=params["pular_gates"], refazer=params["refazer"])
+                    restantes.remove(pt)   # esta parte fechou → sai da fila de retomada
             except Exception as e:  # noqa: BLE001
                 interrompido = True
                 if self.cancel is not None and self.cancel.is_set():
@@ -869,8 +878,9 @@ class App:
                     self._push("ERRO: %s" % e); self._push(traceback.format_exc())
                     self._push("↻ Clique “Continuar” para retomar após corrigir o problema.")
             finally:
-                self.root.after(0, lambda i=interrompido, p=proj_final, e=list(params["etapas"]):
-                                self._fim_run(i, p, e))
+                self.root.after(0, lambda i=interrompido, p=proj_final,
+                                e=list(params["etapas"]), r=list(restantes):
+                                self._fim_run(i, p, e, r))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -880,15 +890,24 @@ class App:
             self.b_parar.config(state="disabled")
             self._log("⏹ Parando… a esteira encerra ao terminar a operação atual (pode levar alguns segundos).")
 
-    def _fim_run(self, interrompido=False, proj=None, etapas=()):
+    def _fim_run(self, interrompido=False, proj=None, etapas=(), restantes=None):
         self.b_rodar.config(state="normal")
         self.b_refazer.config(state="normal")
         self.b_parar.config(state="disabled")
         # "Continuar" só faz sentido quando a rodada NÃO terminou inteira (parada ou erro).
         self.b_continuar.config(state=("normal" if interrompido else "disabled"))
+        if interrompido:
+            # Retoma do PONTO DE PARADA: o Continuar recomeça pela parte que falhou (uma P1 já
+            # concluída NÃO é refeita). Encolhe self.ultima_run["partes"] p/ só as que faltam.
+            if restantes is not None and self.ultima_run:
+                self.ultima_run["partes"] = list(restantes)
+                if restantes:
+                    self._push("↻ Continuar vai retomar em: %s (partes já concluídas não serão refeitas)."
+                               % " → ".join(p.upper() for p in restantes))
+            return
         # Só notifica quando a rodada REALMENTE fechou um vídeo (Etapa 7/8) e o final existe —
         # não incomoda quando a editora rodou só uma etapa solta (ex.: só narração).
-        if interrompido or proj is None:
+        if proj is None:
             return
         if not (7 in etapas or 8 in etapas):
             return

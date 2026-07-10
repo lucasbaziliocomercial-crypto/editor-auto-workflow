@@ -2404,7 +2404,10 @@ def _plano_musica_timeline(ff, base_mat, mat_dirs, segmentos, global_track):
     da sua seção (materiais/<canal>/musicas/ + herdada + global assets/musicas/) ou, na falta, a
     trilha global (padronizados). Janela sem faixa alguma é pulada (sem música ali). [] se não há
     nenhuma faixa (nem por-seção nem global) — o chamador cai no caminho sem música."""
-    _assets = Path(__file__).resolve().parent.parent / "assets" / "musicas"
+    # `_musicas_por_secao` anexa "/musicas" a cada dir (p/ os canais: materiais/<canal> → .../musicas).
+    # A raiz global equivalente é `assets` (não `assets/musicas`), senão viraria assets/musicas/musicas
+    # e o arquivo global em assets/musicas/ (o que o LEIA-ME manda) NUNCA seria achado. Corrigido 2026-07-10.
+    _assets = Path(__file__).resolve().parent.parent / "assets"
     porsec = _musicas_por_secao(list(mat_dirs) + [_assets])
     if not porsec and not global_track:
         return []
