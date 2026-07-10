@@ -325,6 +325,10 @@ class App:
         self.b_refazer.pack(side="left", padx=10)
         ttk.Button(bar, text="\U0001F4C1  Abrir pasta do projeto", style="Big.TButton",
                    command=self.abrir_pasta).pack(side="left", padx=10)
+        # Recarregar: relê as pastas de material (teaser/personagens/QR/modelos) e atualiza os
+        # rótulos na hora — a editora larga arquivos direto nas pastas e não precisa reabrir o painel.
+        ttk.Button(bar, text="↻  Recarregar", style="Big.TButton",
+                   command=self.recarregar_materiais).pack(side="left", padx=10)
 
         self.log = scrolledtext.ScrolledText(root, bg="#0e0e16", fg="#cfd2e0",
                                              insertbackground=FG, font=F_LOG, height=14, relief="flat", bd=0)
@@ -350,6 +354,35 @@ class App:
         self.root.after(120, self._drenar)
 
     def _log(self, msg): self.log.insert("end", str(msg) + "\n"); self.log.see("end")
+
+    def _com_dialogo_na_frente(self, fn, **kw):
+        """Abre um filedialog SEMPRE por cima do painel. Pegadinha do Windows (ver
+        aprendizados.md): o seletor — em especial o de PASTA (SHBrowseForFolder), mas às vezes
+        também o de arquivo — abre ATRÁS da janela e o botão parece 'morto'. Só passar
+        parent=self.root não basta em toda máquina; forçamos o root pra frente com -topmost
+        momentâneo (o diálogo, sendo filho do root, vem por cima) e passamos parent=self.root."""
+        try:
+            self.root.attributes("-topmost", True)
+            self.root.lift(); self.root.focus_force()
+        except tk.TclError:
+            pass
+        try:
+            return fn(parent=self.root, **kw)
+        finally:
+            try:
+                self.root.attributes("-topmost", False)
+            except tk.TclError:
+                pass
+
+    def recarregar_materiais(self):
+        """Relê do disco tudo que a editora larga nas pastas (modelos do canal, teaser,
+        personagens, QR) e atualiza os rótulos na hora — sem fechar/reabrir o painel."""
+        self._atualizar_voz_ui()
+        self._atualizar_modelos_ui()
+        self._atualizar_teaser_ui()
+        self._atualizar_personagens_ui()
+        self._atualizar_qr_ui()
+        self._push("↻ Materiais recarregados do disco.")
 
     def _on_cat(self):
         self._atualizar_voz_ui()
@@ -384,7 +417,8 @@ class App:
         cat = self.cb_cat.get().strip()
         if not cat:
             self._log("Escolha a categoria primeiro."); return
-        caminho = filedialog.askopenfilename(title="Escolher modelo", filetypes=tipos + [("Todos", "*.*")])
+        caminho = self._com_dialogo_na_frente(
+            filedialog.askopenfilename, title="Escolher modelo", filetypes=tipos + [("Todos", "*.*")])
         if not caminho:
             return
         salvar_modelo(cats.canal_de(cat), chave, caminho)
@@ -474,8 +508,8 @@ class App:
     def _escolher_teaser(self):
         # parent=self.root: sem isso o seletor de PASTA do Windows (SHBrowseForFolder) abre
         # ATRÁS da janela do painel e parece que o botão "não faz nada".
-        pasta = filedialog.askdirectory(
-            parent=self.root,
+        pasta = self._com_dialogo_na_frente(
+            filedialog.askdirectory,
             title="Escolher a PASTA do teaser (ex.: o download do Vio)",
             initialdir=self._pasta_inicial_teaser(), mustexist=True)
         if not pasta:
@@ -578,8 +612,8 @@ class App:
     def _escolher_personagens(self):
         import os
         home = Path(os.path.expanduser("~")); dl = home / "Downloads"
-        arquivos = filedialog.askopenfilenames(
-            parent=self.root,
+        arquivos = self._com_dialogo_na_frente(
+            filedialog.askopenfilenames,
             title="Escolher as FOTOS dos personagens (as mesmas do teaser/VEO)",
             initialdir=str(dl if dl.is_dir() else home),
             filetypes=[("Imagem", "*.png *.webp *.jpg *.jpeg *.bmp"), ("Todos", "*.*")])
@@ -657,7 +691,8 @@ class App:
         import os
         import shutil
         home = Path(os.path.expanduser("~")); dl = home / "Downloads"
-        caminho = filedialog.askopenfilename(
+        caminho = self._com_dialogo_na_frente(
+            filedialog.askopenfilename,
             title="Escolher a imagem do QR (PNG/webp já enquadrado, fundo transparente)",
             initialdir=str(dl if dl.is_dir() else home),
             filetypes=[("Imagem", "*.png *.webp *.jpg *.jpeg"), ("Todos", "*.*")])
