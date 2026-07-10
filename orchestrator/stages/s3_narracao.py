@@ -494,8 +494,47 @@ def sintetizar_titulos(proj, log, cancel=None):
 # run()
 # ---------------------------------------------------------------------------
 
+def _narracao_stale(proj):
+    """True se o narration.mp3 é MAIS VELHO que o roteiro.txt — sinal de que o roteiro foi
+    regerado DEPOIS do TTS e o áudio é de outro draft. Como a Etapa 3 é idempotente (pula o
+    TTS quando o mp3 já existe), reusar esse áudio velho faz a montagem sair DESSINCRONIZADA
+    (nenhuma âncora de capítulo casa → fatias de áudio no fallback proporcional). Documentado
+    em aprendizados.md (card 256-Lena, 2026-07-09)."""
+    try:
+        if not (proj.existe(proj.narration_mp3) and proj.existe(proj.roteiro)):
+            return False
+        tol = float(os.environ.get("ROTEIRO_TTS_STALE_TOL", "2"))  # s de folga p/ ruído de mtime
+        return proj.narration_mp3.stat().st_mtime + tol < proj.roteiro.stat().st_mtime
+    except (OSError, ValueError):
+        return False
+
+
+def _modo_stale():
+    """O que fazer quando o narration.mp3 está velho: regen (default) | warn | off."""
+    v = os.environ.get("ROTEIRO_TTS_STALE", "regen").strip().lower()
+    return v if v in ("regen", "warn", "off") else "regen"
+
+
 def run(proj, log, cancel=None, **_):
     preparar_texto(proj, log)
+
+    # Trava anti-áudio-velho: se o roteiro é mais novo que o narration.mp3, o áudio é de outro
+    # draft. Sem isto, o TTS é pulado (idempotência) e a montagem sai descasada — o problema
+    # grave de sincronização do card 256. Default: regenerar (apaga o áudio velho + derivados).
+    modo = _modo_stale()
+    if modo != "off" and _narracao_stale(proj):
+        if modo == "regen":
+            log("    ⚠ narration.mp3 é MAIS VELHO que o roteiro.txt (áudio de outro draft) — "
+                "regenerando o TTS, senão a montagem sairia DESSINCRONIZADA.")
+            for f in (proj.narration_mp3, proj.narration_raw, proj.pausas_flag, proj.narration_srt):
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        else:  # warn
+            log("    ⚠ ATENÇÃO: narration.mp3 é mais velho que o roteiro.txt — provavelmente de "
+                "outro draft. A montagem pode sair DESSINCRONIZADA. Apague o narration.mp3 p/ "
+                "regenerar (ou rode com ROTEIRO_TTS_STALE=regen; =off silencia este aviso).")
 
     if proj.existe(proj.narration_mp3):
         log("    narration.mp3 já existe — TTS pulado.")

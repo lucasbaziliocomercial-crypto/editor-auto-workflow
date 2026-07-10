@@ -28,12 +28,15 @@ import clickup_api
 from common import ErroPipeline, slugify, parece_portugues
 
 _DOC_ID = re.compile(r"docs\.google\.com/document/d/([A-Za-z0-9_-]{20,})")
-# Marcador de aba (guia) do Doc EN. Duas convenções FIXAS que os Docs sempre usam
-# (decisão do editor 2026-07-09) — o número (1, 2, …) mapeia direto pra P1/P2/…:
-#   "Tab 1"  / "Tab 2"                 (nome curto padrão da guia)
-#   "<nome…> Part 1" / "Part 2"        (o título da guia termina em 'Part N')
-# Sempre casa a LINHA INTEIRA (o título da guia é uma linha isolada no export .txt).
-_TAB = re.compile(r"^﻿?\s*(?:Tab\s+(\d+)|.*?\bPart\s+(\d+))\s*$", re.IGNORECASE)
+# Marcador de aba (guia) do Doc EN — LINHA ISOLADA no export .txt. Duas convenções:
+#   "Tab 1" / "Tab 2"            (nome curto padrão da guia — sempre presente hoje)
+#   "Part 2" / "Part 2 — Título" (guia cujo título COMEÇA em 'Part N', com título opcional)
+# O número (1, 2, …) mapeia direto pra P1/P2/…  ⚠ ANCORADO NO INÍCIO de propósito: a versão
+# antiga casava ".*?Part N$" (fim da linha) e engolia o separador de conteúdo "END OF PART 1"
+# como se fosse a guia da P1 — o "Tab 2" seguinte então SOBRESCREVIA a P1 com o hook da P2,
+# deixando roteiro.txt com 0 capítulos (o falso "Doc está em português" do card 256, 2026-07-09).
+_TAB = re.compile(r"^﻿?\s*(?:Tab\s+(\d+)|Part\s+(\d+)(?:\s*[—\-:].*)?)\s*$", re.IGNORECASE)
+_CAP = re.compile(r"(?im)^\**\s*Chapter\s+(\d+)\b")
 # Rótulos que NÃO são o roteiro EN (versão PT de teste / premissa).
 _RE_IGNORAR = re.compile(r"portugu[eê]s|premissa", re.IGNORECASE)
 
@@ -147,11 +150,26 @@ def _baixar_doc_txt(doc_id, log):
     return txt
 
 
+def _split_por_capitulos_reset(texto):
+    """Rede de segurança p/ Doc cuja P2 está numa ABA NATIVA sem 'Tab 2' (o export então
+    concatena as duas partes numa aba só). Fatiа onde a numeração de capítulo RESETA
+    ('Chapter …6' seguido de 'Chapter 1' de novo) -> (p1, p2). Sem reset -> (texto, "")."""
+    caps = list(_CAP.finditer(texto))
+    if len(caps) < 2:
+        return texto, ""
+    for i in range(1, len(caps)):
+        if int(caps[i].group(1)) <= int(caps[i - 1].group(1)):  # numeração caiu = começa a P2
+            corte = caps[i].start()
+            return texto[:corte].strip(), texto[corte:].strip()
+    return texto, ""
+
+
 def _separar_abas(txt):
-    """Divide o texto do Doc pelas linhas de guia ('Tab N' ou '… Part N')
+    """Divide o texto do Doc pelas linhas de guia ('Tab N' ou 'Part N')
     -> {1: texto_p1, 2: texto_p2, ...}.
 
-    Se não houver marcador de aba, tudo vira a aba 1 (P1)."""
+    Se não houver marcador de aba, tudo vira a aba 1 (P1). Fallback: se só houver a aba 1
+    mas a numeração de capítulo resetar no meio, fatia em P1/P2 (P2 em aba nativa sem 'Tab 2')."""
     linhas = txt.replace("\r\n", "\n").split("\n")
     abas = {}
     atual = None
@@ -161,7 +179,7 @@ def _separar_abas(txt):
         if m:
             if atual is not None:
                 abas[atual] = "\n".join(buf).strip()
-            atual = int(m.group(1) or m.group(2))  # 'Tab N' -> g1, '… Part N' -> g2
+            atual = int(m.group(1) or m.group(2))  # 'Tab N' -> g1, 'Part N' -> g2
             buf = []
         else:
             if atual is None:
@@ -169,11 +187,16 @@ def _separar_abas(txt):
             buf.append(ln)
     if atual is not None:
         abas[atual] = "\n".join(buf).strip()
+    # Só a aba 1, mas com reset de numeração dentro dela = P2 sem marcador 'Tab 2'. Fatia.
+    if set(abas) == {1}:
+        p1, p2 = _split_por_capitulos_reset(abas[1])
+        if p2:
+            abas[1], abas[2] = p1, p2
     return abas
 
 
 def _contar_caps(texto):
-    return len(re.findall(r"(?im)^\**\s*Chapter\s+\d+\b", texto))
+    return len(_CAP.findall(texto))
 
 
 # ---------------------------------------------------------------------------
@@ -215,11 +238,16 @@ def run(proj, log, cancel=None, *, card_id=None, categoria=None, **_):
     # "Roteiro em português") — falha ALTO aqui, senão a Etapa 3 gera narração do texto
     # errado e a Etapa 4 só quebra bem depois. Override manual: env ROTEIRO_DOC_URL.
     if _contar_caps(roteiro_p1) == 0:
+        total_caps = _contar_caps(txt)
         raise ErroPipeline(
-            "O Doc %s (Tab 1) não tem NENHUM capítulo em inglês (linhas 'Chapter N —'). "
-            "Provavelmente é a versão em PORTUGUÊS (ou premissa), não o roteiro EN. "
-            "Confira o link do roteiro EN nos comentários do card e, se preciso, force com "
-            "a env ROTEIRO_DOC_URL=<link do Doc EN> antes de rodar a Etapa 1." % doc_id)
+            "O Doc %s (Tab 1) ficou sem NENHUM capítulo em inglês (linhas 'Chapter N —'). "
+            "O Doc inteiro tem %d capítulos e %d abas achadas (%s). %s "
+            "Se preciso, force com a env ROTEIRO_DOC_URL=<link do Doc EN> antes da Etapa 1." % (
+                doc_id, total_caps, len(abas), sorted(abas),
+                "Provavelmente é a versão em PORTUGUÊS (ou premissa), não o roteiro EN — "
+                "confira o comentário do Doc EN no card." if total_caps == 0 else
+                "O Doc EN foi baixado certo, mas a separação de abas caiu numa aba vazia — "
+                "confira os marcadores de guia do Doc ('Tab 1'/'Tab 2')."))
     # Trava de idioma: mesmo COM cabeçalhos "Chapter N —", o miolo pode estar em português
     # (Doc PT que manteve os títulos em inglês). Narração PT + legenda EN destroçada é o
     # pior dos mundos — TRAVA aqui e exige o Doc EN (decisão do editor 2026-07-09). Só vale

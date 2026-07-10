@@ -169,6 +169,10 @@ DEFAULTS = {
     # exata (a montagem insere capas/silêncio que desincronizam a narration.srt original).
     "ROTEIRO_LEGENDA": "1",               # 0 desliga
     # ROTEIRO_CAPTION_FONTSIZE / ROTEIRO_CAPTION_MARGINV: default derivado da altura (~3.3% / ~16%).
+    # Sincronia narração x roteiro (anti-dessincronia — o problema do 256).
+    "ROTEIRO_TTS_STALE": "regen",         # narration.mp3 mais velho que roteiro.txt: regen|warn|off
+    "ROTEIRO_TTS_STALE_TOL": "2",         # folga (s) no mtime p/ evitar falso-positivo
+    "ROTEIRO_SYNC_GUARD": "1",            # Etapa 7 falha alto se 0 âncoras casam (0 = desliga)
 }
 
 

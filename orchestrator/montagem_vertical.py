@@ -398,6 +398,13 @@ def _norm(s):
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower())).strip()
 
 
+def _sync_guard_on():
+    """Trava anti-dessincronia: falha alto quando NENHUMA âncora casa (áudio de outro draft).
+    ROTEIRO_SYNC_GUARD=0 desliga (renderiza mesmo descasado)."""
+    v = os.environ.get("ROTEIRO_SYNC_GUARD", "1").strip().lower()
+    return v not in ("0", "off", "nao", "não", "no", "false")
+
+
 def _boundaries(proj, ff, log):
     """Devolve (total, [b1, b2, ...]) — os tempos (s) em que cada CAPÍTULO começa na narração.
 
@@ -466,6 +473,18 @@ def _boundaries(proj, ff, log):
         if p is not None:
             starts[c["n"]] = _tempo_da_pos(p)
             _desde = p + 1
+
+    # GUARD anti-dessincronia: se NENHUM capítulo (de 2+) casou com a narração, quase sempre o
+    # narration.mp3 é de OUTRO draft do roteiro — a Etapa 3 é idempotente e reusou o áudio velho
+    # (o roteiro foi regerado DEPOIS do TTS). Renderizar assim = 78 min de vídeo descasado, com
+    # todas as fatias de áudio caindo no fallback proporcional. Falha alto em vez de gerar calado.
+    if _sync_guard_on() and len(caps) >= 2 and not starts:
+        raise ErroPipeline(
+            "Sincronia: NENHUM dos %d capítulos casou com a narração (narration.srt). Quase sempre "
+            "o narration.mp3 é de OUTRO draft do roteiro (a Etapa 3 pula o TTS quando o mp3 já "
+            "existe e reusa o áudio velho). CORREÇÃO: apague na pasta do projeto o narration.mp3, "
+            "narration_raw.mp3, .pausas_otimizadas e narration.srt, e rode a Etapa 3 de novo (gera "
+            "o TTS do texto atual). Para renderizar mesmo descasado: ROTEIRO_SYNC_GUARD=0." % len(caps))
 
     bnds = []
     ncaps = len(caps)
