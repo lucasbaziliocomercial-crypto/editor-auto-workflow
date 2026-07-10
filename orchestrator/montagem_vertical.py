@@ -4,11 +4,15 @@
 Reproduz a ESTRUTURA que o Romance Maker montava no CapCut, mas RENDERIZA um MP4 headless
 (o pipeline exige out/final.mp4 — sem passo manual no CapCut). Timeline:
 
-    TEASER → [INTRO PÓS TEASER] → [capa_1] corpo_1 → … → RABO DA ISCA
+    TEASER → [INTRO PÓS TEASER] → [capa_1] corpo_1 → PRETO → [capa_2] → PRETO → corpo_2 → … → RABO DA ISCA
     └ clipes drop-in mudos, cortados p/ durar o GANCHO falado; narração do gancho por baixo
                     └ corpo = imagens do capítulo (Ken Burns) sincronizadas à narração daquele cap.
-                       a capa (Etapa 6) anuncia o capítulo; a narradora DITA "Chapter N — Título"
-                       por baixo (covers/titulo_NN.mp3, Etapa 3), com respiro no fim
+                       ENTRE as imagens do corpo há um DISSOLVE (crossfade) suave (_corpo_xfade, ~0.4s);
+                       o teaser NÃO leva dissolve (corte seco). A cada TROCA de capítulo há uma TELA
+                       PRETA de respiro ANTES e DEPOIS da capa (_blackgap_dur, ~2s; a música global
+                       segue por baixo) — a editora achou os cortes "secos" (2026-07-10). O preto
+                       antes da 1ª capa é pulado. a capa (Etapa 6) anuncia o capítulo; a narradora
+                       DITA "Chapter N — Título" por baixo (covers/titulo_NN.mp3, Etapa 3), c/ respiro
 
     RABO DA ISCA (P1), ordem fixa da editora (2026-07-09):
         INTRO BOOK 02 → RESUMO → CTA → AVISO DE CLONE → TUTORIAL PLATAFORMA → MINUTO FINAL
@@ -168,6 +172,21 @@ def _cover_narrar_on():
     gerado na Etapa 3) em vez de silêncio. Desliga com ROTEIRO_COVER_NARRAR_TITULO=0."""
     v = os.environ.get("ROTEIRO_COVER_NARRAR_TITULO", "1").strip().lower()
     return v not in ("0", "off", "nao", "não", "no", "false")
+
+
+def _blackgap_dur():
+    """Duração (s) da TELA PRETA de respiro na troca de capítulo — a pausa dramática ANTES e
+    DEPOIS de cada capa (decisão da editora 2026-07-10: os cortes estavam 'secos', faltava esse
+    silêncio preto na virada). A música de fundo global continua por baixo (o mix final cobre o
+    vídeo inteiro), então é um respiro COM trilha, não mudo total. Default 1.0s (a editora mede ~1s
+    no vídeo-referência); 0/off desliga. Env: ROTEIRO_BLACKGAP."""
+    v = os.environ.get("ROTEIRO_BLACKGAP", "1.0").strip().lower()
+    if v in ("0", "off", "none", "nao", "não", "no", "false", ""):
+        return 0.0
+    try:
+        return max(0.0, float(v))
+    except (TypeError, ValueError):
+        return 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +612,50 @@ def _audio_titulo(ff, src, dur, out, log):
     return out.exists() and out.stat().st_size > 0
 
 
+# --- SFX de troca de capítulo -------------------------------------------------
+# Efeito sonoro FIXO que toca no COMEÇO de cada capa de troca (junto com o "Chapter N — Título"),
+# marcando a virada de capítulo. Insumo por-vídeo/canal/global (troca_capitulo.<ext>):
+#   projects/<slug>/sfx/ > materiais/<canal>/sfx/ (+ herdada) > assets/sfx/  (global default)
+# Kill-switch ROTEIRO_SFX_TROCA=0. Volume ROTEIRO_SFX_TROCA_VOL (default 1.0).
+_SFX_TROCA_NOMES = ("troca_capitulo", "troca-capitulo", "sfx_troca", "sfx-troca", "sfx_por_cap")
+
+def _sfx_troca_on():
+    return os.environ.get("ROTEIRO_SFX_TROCA", "1").strip().lower() not in (
+        "0", "off", "none", "nao", "não", "no", "false")
+
+
+def _sfx_troca_vol():
+    try:
+        return max(0.0, float(os.environ.get("ROTEIRO_SFX_TROCA_VOL", "1.0")))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _achar_sfx_troca(dirs):
+    """1º arquivo de áudio cujo nome (sem ext) casa um dos apelidos do SFX de troca, varrendo
+    `dirs` na ordem (próprio vence). Ignora pastas inexistentes. None se nada casar."""
+    from common import AUDIO_EXTS
+    for d in dirs:
+        for f in _listar(d, AUDIO_EXTS):
+            if f.stem.strip().lower().replace(" ", "_") in _SFX_TROCA_NOMES:
+                return f
+    return None
+
+
+def _sfx_mix(ff, base_aud, sfx, dur, out, log, vol):
+    """Mistura o SFX de troca (sfx) por CIMA do áudio da capa (base_aud) começando em t=0,
+    mantendo a narração do título no volume cheio (amix normalize=0 → não atenua a voz). O SFX é
+    resampleado p/ 48k stereo e o mix termina junto com a capa (duration=first) + `-t dur`."""
+    cmd = [ff, "-y", "-hide_banner", "-loglevel", "error",
+           "-i", str(base_aud), "-i", str(sfx),
+           "-filter_complex",
+           "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,volume=%.3f[s];"
+           "[0:a][s]amix=inputs=2:duration=first:normalize=0[a]" % vol,
+           "-map", "[a]", "-t", "%.3f" % max(0.05, dur), *_AENC, str(out)]
+    _run(cmd, log, "sfx-troca")
+    return out.exists() and out.stat().st_size > 0
+
+
 # ---------------------------------------------------------------------------
 # Blocos de vídeo (mudos) por segmento
 # ---------------------------------------------------------------------------
@@ -688,6 +751,22 @@ def _kb_fade_frames():
         return 0
 
 
+def _corpo_xfade():
+    """Duração (s) do CROSSFADE (dissolve suave, transição 'fade' do xfade) ENTRE as imagens do
+    corpo — a transição 'do Shotcut' que a editora sempre usou p/ dar dinâmica sem sujar a imagem
+    (decisão da editora 2026-07-10). Distinto do _kb_fade_frames (dip-to-black): aqui as cenas se
+    FUNDEM uma na outra, sem passar pelo preto. Default 0.4s; 0/off = corte seco (concat, o antigo).
+    Só entra no CORPO (o teaser fica com corte seco, pra o gancho continuar punchy). Cenas curtas
+    demais (imagem <= 1.5·xfade) caem no concat automaticamente. Env: ROTEIRO_CORPO_XFADE."""
+    v = os.environ.get("ROTEIRO_CORPO_XFADE", "0.4").strip().lower()
+    if v in ("0", "off", "none", "nao", "não", "no", "false", ""):
+        return 0.0
+    try:
+        return max(0.0, float(v))
+    except (TypeError, ValueError):
+        return 0.4
+
+
 def _corpo_paralelo():
     """Quantos CORPOS (Ken Burns) renderizar AO MESMO TEMPO. O `zoompan` do FFmpeg é single-thread,
     então em fila cada render usa só ~2-3 núcleos e sobra CPU ociosa — o gargalo da montagem. Rodar
@@ -705,12 +784,23 @@ def _corpo_paralelo():
 def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log):
     """Slideshow com Ken Burns DINÂMICO: N imagens dividindo `dur` igualmente; cada imagem faz um
     movimento CONTÍNUO (zoom-in/-out + pan) que dura a cena inteira e varia por imagem (presets
-    _KB_MODES, ciclados por índice). Vídeo MUDO. Concatena via filter_complex (uma passada)."""
+    _KB_MODES, ciclados por índice). Vídeo MUDO. Uma passada (filter_complex).
+
+    Entre as cenas há um CROSSFADE (dissolve) suave de _corpo_xfade() s — as imagens se FUNDEM em
+    vez do corte seco (pedido da editora 2026-07-10). Cada imagem é alongada em (n-1)/n·xfade p/ que,
+    depois das n-1 sobreposições, o slideshow continue com EXATAMENTE `dur` (o áudio é a espinha).
+    Sem xfade (ou cenas curtas / 1 imagem) cai no `concat` seco de antes."""
     imgs = [i for i in imgs if Path(i).exists()]
     if not imgs:
         return _tela_cor(ff, dur, w, h, fps, out, log)
     n = len(imgs)
-    seg = max(0.5, dur / n)
+    xf = _corpo_xfade()
+    base = max(0.5, dur / n)
+    # xfade só se houver >=2 cenas e cada uma for confortavelmente maior que o dissolve (senão o
+    # crossfade come a cena inteira e vira mingau) — nesse caso, corte seco.
+    usar_xf = xf > 0.01 and n >= 2 and base > xf * 1.5
+    # com n-1 sobreposições de `xf`, o total = n·seg - (n-1)·xf; resolvendo p/ total == dur:
+    seg = ((dur + (n - 1) * xf) / n) if usar_xf else base
     frames = max(2, int(round(seg * fps)))
     sw, sh = _kb_supersample(w, h)
     mb = _kb_motionblur(fps)
@@ -734,13 +824,54 @@ def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log):
             chain.append("fade=t=out:st=%.4f:d=%.4f:color=black" % (st_out, fade / float(fps)))
         if mb > 1:
             chain.append("tmix=frames=%d" % mb)   # motion-blur temporal: funde a tremida do zoompan
-        chain.append("setsar=1")
+        chain.append("setsar=1,format=yuv420p,fps=%d" % fps)  # xfade exige SAR/pix_fmt/fps iguais
         filtros.append("[%d:v]%s[v%d]" % (k, ",".join(chain), k))
         labels.append("[v%d]" % k)
-    fc = ";".join(filtros) + ";" + "".join(labels) + "concat=n=%d:v=1:a=0[v]" % n
+
+    def _fc_concat():
+        return ";".join(filtros) + ";" + "".join(labels) + "concat=n=%d:v=1:a=0[v]" % n, "[v]"
+
+    def _fc_xfade():
+        # encadeia xfade=fade (dissolve): cada par se sobrepõe `xf`s. O offset é o comprimento
+        # acumulado da corrente MENOS o dissolve, então o total fecha em n·seg-(n-1)·xf == dur.
+        chain, prev, acc = [], "[v0]", seg
+        for k in range(1, n):
+            lbl = "[x%d]" % k
+            chain.append("%s[v%d]xfade=transition=fade:duration=%.3f:offset=%.3f%s"
+                         % (prev, k, xf, acc - xf, lbl))
+            prev, acc = lbl, acc + seg - xf
+        return ";".join(filtros) + ";" + ";".join(chain), prev
+
+    fc, mapa = (_fc_xfade() if usar_xf else _fc_concat())
     cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", *inputs,
-           "-filter_complex", fc, "-map", "[v]", *_venc_args(fps), "-an", str(out)]
+           "-filter_complex", fc, "-map", mapa, *_venc_args(fps), "-an", str(out)]
     _run(cmd, log, "kenburns")
+    if usar_xf and not (out.exists() and out.stat().st_size > 0):
+        # fallback: algum build sem xfade (ou expressão recusada) → refaz no concat seco, sem
+        # derrubar a montagem. Recalcula com seg=base (sem a compensação do dissolve).
+        log("    ⚠ dissolve (xfade) falhou no corpo — refazendo com corte seco (concat).")
+        seg2 = base
+        frames2 = max(2, int(round(seg2 * fps)))
+        inputs2, filtros2, labels2 = [], [], []
+        for k, img in enumerate(imgs):
+            z, x, y = _kb_expr(_KB_MODES[k % len(_KB_MODES)], frames2)
+            inputs2 += ["-loop", "1", "-framerate", str(fps), "-t", "%.3f" % seg2, "-i", str(img)]
+            ch = ["scale=%d:%d:force_original_aspect_ratio=increase:flags=lanczos" % (sw, sh),
+                  "crop=%d:%d" % (sw, sh),
+                  "zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=%d" % (z, x, y, w, h, fps)]
+            if fade and frames2 > 2 * fade:
+                st_out = (frames2 - fade) / float(fps)
+                ch.append("fade=t=in:st=0:d=%.4f:color=black" % (fade / float(fps)))
+                ch.append("fade=t=out:st=%.4f:d=%.4f:color=black" % (st_out, fade / float(fps)))
+            if mb > 1:
+                ch.append("tmix=frames=%d" % mb)
+            ch.append("setsar=1")
+            filtros2.append("[%d:v]%s[v%d]" % (k, ",".join(ch), k))
+            labels2.append("[v%d]" % k)
+        fc2 = ";".join(filtros2) + ";" + "".join(labels2) + "concat=n=%d:v=1:a=0[v]" % n
+        _run([ff, "-y", "-hide_banner", "-loglevel", "error", *inputs2,
+              "-filter_complex", fc2, "-map", "[v]", *_venc_args(fps), "-an", str(out)],
+             log, "kenburns-concat")
     return out.exists() and out.stat().st_size > 0
 
 
@@ -1210,9 +1341,12 @@ def _legendar(proj, ff, video_montado, tmp, w, h, fps, log, qr_img=None, qr_frag
     if qr_img is not None and qr_frag is not None:
         # Legenda + QR na MESMA passada: [0:v]->subtitles->[s]; [1:v]->QR->[qr]; overlay.
         prep, qx, qy = qr_frag  # prep produz o label [qr] a partir do input 1
-        fc = "[0:v]%s[s];%s;[s][qr]overlay=%s:%s:format=auto[v]" % (sub_f, prep, qx, qy)
+        # -loop 1 no PNG do QR + shortest=1 no overlay: a imagem estática vira um stream que
+        # dura o vídeo INTEIRO (sem -loop ela é 1 frame só e o QR sumia após o teaser). O vídeo
+        # (input 0) manda na duração; o QR looped é cortado no fim dele.
+        fc = "[0:v]%s[s];%s;[s][qr]overlay=%s:%s:format=auto:shortest=1[v]" % (sub_f, prep, qx, qy)
         cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", video_montado.name,
-               "-i", str(qr_img), "-filter_complex", fc, "-map", "[v]", "-map", "0:a?",
+               "-loop", "1", "-i", str(qr_img), "-filter_complex", fc, "-map", "[v]", "-map", "0:a?",
                *_venc_args(fps), "-c:a", "copy", out.name]
         _run(cmd, log, "legenda+qr", cwd=tmp)
     else:
@@ -1220,7 +1354,8 @@ def _legendar(proj, ff, video_montado, tmp, w, h, fps, log, qr_img=None, qr_frag
               "-vf", sub_f, *_venc_args(fps), "-c:a", "copy", out.name], log, "legenda", cwd=tmp)
     narr.unlink(missing_ok=True)
     if out.exists() and out.stat().st_size > 0:
-        extra = " + QR (mesma passada)" if (qr_img is not None and qr_frag is not None) else ""
+        extra = (" + QR '%s' no vídeo inteiro (mesma passada)" % qr_img.name
+                 if (qr_img is not None and qr_frag is not None) else "")
         log("    ✓ legenda queimada (uma linha ≤%d, estilo vertical, MarginV alto)%s." % (maximo, extra))
         return out
     log("    ⚠ falha ao queimar a legenda%s — seguindo sem." % (" + QR" if qr_img else ""))
@@ -1281,8 +1416,41 @@ def construir(proj, log, cancel=None, parte=None):
                 return r
         return []
 
+    # SFX de troca de capítulo — resolvido UMA vez: por-vídeo > canal (+herdado) > global assets.
+    _sfx_cache = {}
+
+    def _sfx_troca_path():
+        if "p" not in _sfx_cache:
+            _assets_sfx = Path(__file__).resolve().parent.parent / "assets" / "sfx"
+            dirs = [proj.dir / "sfx"] + [d / "sfx" for d in mat_dirs] + [_assets_sfx]
+            _sfx_cache["p"] = _achar_sfx_troca(dirs) if _sfx_troca_on() else None
+        return _sfx_cache["p"]
+
     tmp = proj.dir / "out"
     tmp.mkdir(parents=True, exist_ok=True)
+
+    # TELA PRETA de respiro na troca de capítulo (antes E depois de cada capa). Segmento CONSTANTE
+    # (preto + silêncio, mesmo formato dos demais → concat -c copy), gerado UMA vez e reusado em
+    # todas as viradas. A chave do nome (dims/fps/dur) evita reusar um preto de dimensão/duração
+    # antiga entre runs. A música global entra por baixo dele no mix final.
+    _blk_cache = {}
+
+    def _blackgap_seg():
+        gap = _blackgap_dur()
+        if gap <= 0:
+            return None
+        if "s" not in _blk_cache:
+            nome = "zz_blackgap_%dx%d_%d_%s" % (w, h, fps, ("%.2f" % gap).replace(".", "p"))
+            s = _seg_path(nome)
+            if not (s.exists() and s.stat().st_size > 0):
+                vmudo = tmp / ("_v_%s.mp4" % nome)
+                _tela_cor(ff, gap, w, h, fps, vmudo, log)          # preto puro
+                aud = tmp / ("_a_%s.m4a" % nome)
+                _silencio(ff, gap, aud, log)                        # silêncio (música vem no mix)
+                _mux(ff, vmudo, aud, s, log)
+                vmudo.unlink(missing_ok=True); aud.unlink(missing_ok=True)
+            _blk_cache["s"] = s if (s.exists() and s.stat().st_size > 0) else None
+        return _blk_cache["s"]
 
     # Clipes do teaser (POR VÍDEO, fallback por canal), JÁ SEM a marca 'Veo' — limpos UMA vez e
     # reusados no teaser, resumo P2, CTA e último minuto. Memoizado (a limpeza é cara/idempotente).
@@ -1401,7 +1569,8 @@ def construir(proj, log, cancel=None, parte=None):
         def _seg_capa():
             s = _seg_path("%02d_capa" % n)
             titulo_mp3 = proj.covers_dir / ("titulo_%02d.mp3" % n)
-            if _seg_fresco(s, titulo_mp3):
+            sfx = _sfx_troca_path()
+            if _seg_fresco(s, titulo_mp3, sfx):
                 return s
             if not (capa.exists() and capa.stat().st_size > 0):
                 return None
@@ -1416,6 +1585,12 @@ def construir(proj, log, cancel=None, parte=None):
                 _audio_titulo(ff, titulo_mp3, dur, aud, log)
             else:
                 _silencio(ff, dur, aud, log)
+            # SFX FIXO de troca de capítulo por CIMA, começando em t=0 (marca a virada). A voz do
+            # título fica no volume cheio (amix normalize=0). Sem SFX/desligado, segue como estava.
+            if sfx is not None:
+                aud_sfx = tmp / ("_a_capa_sfx_%02d.m4a" % n)
+                if _sfx_mix(ff, aud, sfx, dur, aud_sfx, log, _sfx_troca_vol()):
+                    aud.unlink(missing_ok=True); aud = aud_sfx
             _mux(ff, vmudo, aud, s, log)
             vmudo.unlink(missing_ok=True); aud.unlink(missing_ok=True)
             return s
@@ -1463,14 +1638,41 @@ def construir(proj, log, cancel=None, parte=None):
     # Monta os segmentos NA ORDEM dos capítulos — o paralelismo mexe só no tempo de render, não na
     # sequência. As mensagens por-capítulo também saem aqui, em ordem (durante o render elas se
     # intercalariam por serem concorrentes).
+    #
+    # TELA PRETA de respiro em volta da CAPA (troca de capítulo): a capa fica emoldurada por preto
+    # dos dois lados — ...corpo → PRETO → capa → PRETO → corpo... O preto ANTES da 1ª capa é pulado
+    # (ela já vem logo depois do teaser/intro; a editora não quis respiro no arranque do cap 1).
+    blk = _blackgap_seg()
+    _n_pretos = 0
+
+    def _add(seg):
+        nonlocal _n_pretos
+        if seg is not None:
+            segmentos.append(seg)
+            if seg is blk:
+                _n_pretos += 1
+
     for _idx in range(len(caps)):
         capa_seg, corpo_seg, _msg = _res[_idx]
-        ordem = [capa_seg, corpo_seg] if capa_pos == "antes" else [corpo_seg, capa_seg]
-        for s in ordem:
-            if s is not None:
-                segmentos.append(s)
+        if capa_pos == "antes":
+            if capa_seg is not None and _idx > 0:
+                _add(blk)                    # PRETO antes da capa (só cap 2..N)
+            _add(capa_seg)
+            if capa_seg is not None:
+                _add(blk)                    # PRETO depois da capa (antes do corpo)
+            _add(corpo_seg)
+        else:  # capa fecha o capítulo (ROTEIRO_CAPA_POS=depois)
+            _add(corpo_seg)
+            if capa_seg is not None:
+                _add(blk)                    # PRETO antes da capa de fechamento
+            _add(capa_seg)
+            if capa_seg is not None and _idx < len(caps) - 1:
+                _add(blk)                    # PRETO depois (antes do próximo corpo)
         if _msg:
             log(_msg)
+    if blk is not None and _n_pretos:
+        log("    tela preta de troca de capítulo: %d respiro(s) de %.1fs (antes/depois das capas)."
+            % (_n_pretos, _blackgap_dur()))
 
     # --- 3) RESUMO P2 + CTA (drop-in) ----------------------------------------
     def _drop_seg(nome, subpasta, modelo_key, proj_stem=None):

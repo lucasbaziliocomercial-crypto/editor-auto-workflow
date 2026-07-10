@@ -129,7 +129,7 @@ def materiais_canal(canal):
     padrão se não existir (vazia — só a estrutura, pro editor saber onde largar cada coisa)."""
     base = MATERIAIS_DIR / slugify(canal or "sem-canal", maxlen=40)
     for sub in ("teaser", "take_p2", "book2", "cta", "padronizados", "template_capa", "qr",
-                "detalhes"):
+                "detalhes", "sfx"):
         (base / sub).mkdir(parents=True, exist_ok=True)
     return base
 

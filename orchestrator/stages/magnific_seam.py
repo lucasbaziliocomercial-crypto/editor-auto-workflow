@@ -359,6 +359,24 @@ def allowed_tools():
     return "Read Write Bash " + magnific
 
 
+# Ferramentas de VÍDEO do Magnific — usadas SÓ pela ABERTURA da P2 (image->video do thumbnail,
+# 2026-07-10). Separadas do allowlist de imagem porque nenhuma outra etapa gera vídeo. video_generate
+# é assíncrono (creations_wait); o thumbnail sobe como creation (request/finalize_upload) e entra como
+# keyframe inicial.
+_MAGNIFIC_VIDEO_TOOLS = (
+    "video_models_list", "video_generate", "creations_wait",
+    "creations_request_upload", "creations_upload_file", "creations_upload_image",
+    "creations_finalize_upload", "creations_get", "creations_show",
+)
+
+
+def allowed_tools_video():
+    """--allowedTools da ABERTURA (image->video): Read/Write/Bash + as tools de vídeo do Magnific."""
+    pref = _prefixo()
+    tools = " ".join("%s__%s" % (pref, t) for t in _MAGNIFIC_VIDEO_TOOLS)
+    return "Read Write Bash " + tools
+
+
 # Trecho de instrução reaproveitado pelas etapas 6 e 7 (o padrão verificado).
 def receita(n, alvo_desc, mode_override=None, quality=None):
     """Instrução do passo Magnific. `alvo_desc` descreve onde salvar os PNGs.

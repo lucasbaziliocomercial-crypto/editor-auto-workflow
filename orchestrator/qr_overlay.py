@@ -126,10 +126,13 @@ def aplicar(proj, canal, ff, video_in, saida, w, h, fps, log, venc_args):
     else:
         prep = ("[1:v]format=rgba,colorchannelmixer=aa=%.3f[qr]" % op)
         pos = _pos()
-    fc = "%s;[0:v][qr]overlay=%s:%s:format=auto[v]" % (prep, pos[0], pos[1])
+    # -loop 1 no PNG do QR + shortest=1 no overlay: a imagem estática vira um stream que dura o
+    # vídeo INTEIRO (sem -loop ela é 1 frame só e o QR sumia após o teaser). O vídeo (input 0)
+    # manda na duração; o QR looped é cortado no fim dele.
+    fc = "%s;[0:v][qr]overlay=%s:%s:format=auto:shortest=1[v]" % (prep, pos[0], pos[1])
 
     cmd = [ff, "-y", "-hide_banner", "-loglevel", "error",
-           "-i", str(video_in), "-i", str(qr),
+           "-i", str(video_in), "-loop", "1", "-i", str(qr),
            "-filter_complex", fc, "-map", "[v]", "-map", "0:a?",
            *venc_args, "-c:a", "copy", str(saida)]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **SUBPROCESS_FLAGS)

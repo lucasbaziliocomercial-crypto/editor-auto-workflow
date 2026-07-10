@@ -364,6 +364,25 @@ def _preparar_projeto_p2(parent, slug, log):
         log("  P2: bible + refs da P1 reaproveitados (Etapas 1-2 puladas na P2).")
     else:
         log("  P2: sem bible da P1 — a Etapa 2 será gerada na pasta da P2.")
+
+    # A P2 ganhou ABERTURA (thumbnail animado por IA) e CENAS FINAIS (clipes do teaser) — 2026-07-10.
+    # Ambas moram na P1: o thumb_ref.png (baixado na Etapa 1) e a pasta teaser/ (largada pela editora
+    # por-vídeo). A pasta da P2 é irmã e não os tinha; copiamos aqui (só o que falta) pra a Etapa 7
+    # da P2 achar os insumos sem depender da pasta da P1.
+    if parent.existe(parent.thumb_ref) and not p2.existe(p2.thumb_ref):
+        shutil.copyfile(parent.thumb_ref, p2.thumb_ref)
+        log("  P2: thumb_ref.png copiado da P1 (fonte da abertura animada).")
+    tsrc = parent.dir / "teaser"
+    if tsrc.is_dir():
+        tdst = p2.dir / "teaser"
+        tdst.mkdir(parents=True, exist_ok=True)
+        copiados = 0
+        for clip in sorted(tsrc.glob("*")):
+            if clip.is_file() and not (tdst / clip.name).exists():
+                shutil.copyfile(clip, tdst / clip.name)
+                copiados += 1
+        if copiados:
+            log("  P2: %d clipe(s) do teaser copiado(s) da P1 (fonte das cenas finais)." % copiados)
     return p2
 
 

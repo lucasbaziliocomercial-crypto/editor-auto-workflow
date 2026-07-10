@@ -28,6 +28,7 @@ Falha graciosa: sem clipes de teaser, sem texto de resumo, ou sem base de CTA ->
 """
 import os
 import json
+import random
 from pathlib import Path
 
 import common
@@ -75,6 +76,18 @@ def _visual_teaser(ff, clips, dur, w, h, fps, out, log):
 # ÚLTIMO fecha completo (o rabo do áudio, se sobrar, vira silêncio no mux). Substitui o
 # _visual_teaser (que picotava) SÓ no resumo/CTA — o ultimo_minuto continua com _plano_cortes.
 
+def _ordem_embaralhada(clips, seed):
+    """Ordem EMBARALHADA dos clipes do teaser (decisão da editora 2026-07-10: 'embaralhar tudo'
+    — as mídias do resumo/CTA não devem sair na MESMA sequência do teaser). Determinística por
+    `seed` (slug + tipo de segmento): re-render dá a mesma ordem (idempotente), mas resumo e CTA
+    ficam com ordens DIFERENTES entre si e diferentes do teaser."""
+    if not clips or len(clips) <= 2 or not seed:
+        return list(clips)
+    out = list(clips)
+    random.Random(seed).shuffle(out)
+    return out
+
+
 def _plano_completo(ff, clips, dur_alvo, max_voltas=12):
     """Sequência de clipes (ciclando a lista) cujas durações NATURAIS somam >= dur_alvo, cada
     um INTEIRO (nunca cortado). Uma passada no mínimo; o teto evita loop infinito."""
@@ -116,9 +129,10 @@ def _concat_full(ff, clips, w, h, fps, out, log):
     return out.exists() and out.stat().st_size > 0
 
 
-def _visual_completo(ff, clips, dur_alvo, w, h, fps, out, log):
-    """Vídeo mudo = takes do VEO INTEIROS, ciclando até cobrir dur_alvo."""
-    seq = _plano_completo(ff, clips, dur_alvo)
+def _visual_completo(ff, clips, dur_alvo, w, h, fps, out, log, seed=None):
+    """Vídeo mudo = takes do VEO INTEIROS, EMBARALHADOS (por `seed`), ciclando até cobrir
+    dur_alvo."""
+    seq = _plano_completo(ff, _ordem_embaralhada(clips, seed), dur_alvo)
     if not seq:
         return False
     return _concat_full(ff, seq, w, h, fps, out, log)
@@ -269,9 +283,10 @@ def construir_resumo_p2(proj, base_mat, teaser_clips, w, h, fps, tmp, log, cance
         log("    ⚠ resumo P2: áudio TTS vazio/curto — pulando geração.")
         return None
 
-    # CORPO: takes do VEO INTEIROS (ciclando até cobrir a narração) — nada de picotar.
+    # CORPO: takes do VEO INTEIROS, EMBARALHADOS (ciclando até cobrir a narração) — nada de picotar.
     body_v = tmp / "_v_resumo.mp4"
-    if not _visual_completo(ff, teaser_clips, dur, w, h, fps, body_v, log):
+    if not _visual_completo(ff, teaser_clips, dur, w, h, fps, body_v, log,
+                            seed="resumo:" + proj.dir.name):
         return None
     body = tmp / "_resumo_body.mp4"
     ok = _mux_video_lead(ff, body_v, aud, body, log)   # takes completos + narração (rabo em silêncio)
@@ -349,9 +364,10 @@ def construir_cta(proj, base_mat, modelos, teaser_clips, w, h, fps, tmp, log, ca
         aud.unlink(missing_ok=True)
         return None
 
-    # VISUAL: takes do VEO INTEIROS cobrindo o áudio fixo da CTA (sem picotar).
+    # VISUAL: takes do VEO INTEIROS, EMBARALHADOS, cobrindo o áudio fixo da CTA (sem picotar).
     vmudo = tmp / "_v_cta.mp4"
-    if not _visual_completo(ff, teaser_clips, dur, w, h, fps, vmudo, log):
+    if not _visual_completo(ff, teaser_clips, dur, w, h, fps, vmudo, log,
+                            seed="cta:" + proj.dir.name):
         aud.unlink(missing_ok=True)
         return None
     ok = _mux_video_lead(ff, vmudo, aud, seg, log)   # takes completos + áudio-base (rabo em silêncio)
