@@ -3,7 +3,7 @@
 
 Consome prompts_imagens.txt (Etapa 4) e gera um PNG por prompt em images/img_NNN.png,
 via MCP do Magnific (claude -p), no modelo econômico do canal (flux-2-klein por padrão),
-no aspecto do vídeo (ROTEIRO_ASPECT = 9:16 por padrão).
+no aspecto do vídeo (ROTEIRO_ASPECT = 16:9 por padrão).
 
 REFERÊNCIA DE PERSONAGEM = decisão da equipe: usar as fotos de referencias/ DIRETO como
 `reference type=character` (subindo cada PNG como creation), SEM criar Library na conta da
@@ -27,10 +27,32 @@ import re
 
 from common import ErroPipeline
 from stages import magnific_seam
+from stages import qa_imagens
+
+
+# Regra ANTI-BUG injetada em TODA geração de imagem do corpo (1ª passada e regeneração).
+# Ataca a causa-raiz do bug de character-merge: forçar as DUAS referências de personagem em
+# TODA cena faz o modelo às vezes FUNDIR os dois (ex.: o reflexo no espelho da mulher saiu com
+# o rosto do homem vestindo o vestido dela). Estas frases mantêm a regra dos 2 protagonistas
+# como referência, mas travam a SEPARAÇÃO de identidade/roupa e a anatomia correta.
+_ANTIBUG = (
+    "REGRA ANTI-BUG (CRÍTICA — vale para TODA imagem, mesmo com as 2 referências anexadas):\n"
+    "• CADA personagem mantém o PRÓPRIO rosto, cabelo e roupa. NUNCA troque nem misture a roupa "
+    "ou o rosto de um personagem no outro. As duas fotos são REFERÊNCIA de aparência — não "
+    "significa colar os dois em toda cena.\n"
+    "• Se a linha do prompt descreve só UMA pessoa na cena, gere só UMA pessoa. NÃO duplique o "
+    "outro protagonista nem funda os dois num corpo só. O 2º personagem entra como referência de "
+    "identidade, não precisa aparecer na cena se o prompt não pede.\n"
+    "• ESPELHO/REFLEXO/VIDRO: qualquer reflexo tem de mostrar a MESMA pessoa, com a MESMA roupa e "
+    "pose de quem está na frente — nunca a outra pessoa nem outra roupa.\n"
+    "• ANATOMIA HUMANA CORRETA: exatamente 2 braços, 2 pernas, 1 cabeça por pessoa, mãos com 5 "
+    "dedos; sem membros/dedos a mais ou a menos, sem corpos fundidos, sem rosto derretido.\n"
+    "• SEM texto, legenda, subtítulo, marca-d'água, logo ou número renderizado na imagem.\n"
+)
 
 
 def _aspect():
-    return os.environ.get("ROTEIRO_ASPECT", "9:16").strip() or "9:16"
+    return os.environ.get("ROTEIRO_ASPECT", "16:9").strip() or "16:9"
 
 
 def _ler_prompts(proj):
@@ -96,15 +118,34 @@ def _instrucao(proj, total, faltam, aspect):
         "prompt que falta (%s), cada uma com {prompt:<o prompt daquela linha>, mode:\"%s\", "
         "aspectRatio:\"%s\", count:1, references:<SEMPRE os dois protagonistas + secundários citados>}. "
         "aspectRatio TRAVADO em "
-        "%s (vídeo vertical) — NÃO troque. Guarde o `identifier` de todos.\n"
+        "%s (formato do canal) — NÃO troque. Guarde o `identifier` de todos.\n"
         "FASE 2 — ESPERE TODAS: mcp__magnific__creations_wait até todas concluírem; pegue o webUrl.\n"
         "FASE 3 — BAIXE TODAS: `Bash curl -L -o images/img_NNN.png \"<webUrl>\"` — o NNN é o número "
         "da linha do prompt (img_001 -> images/img_001.png). Crie a pasta images/ se preciso.\n\n"
+        "%s\n"
         "GERE SOMENTE as que faltam: %s. Se uma imagem já existe em images/, NÃO regere. "
         "Romance sensual mas platform-safe (sem nudez/sexo explícito). Se UMA falhar, re-tente só "
         "ela. No fim, imprima quantos PNGs salvou."
-        % (total, faltam_txt, mode, aspect, aspect, faltam_txt)
+        % (total, faltam_txt, mode, aspect, aspect, _ANTIBUG, faltam_txt)
     )
+
+
+def _instrucao_regen(proj, total, faltam, aspect, issues):
+    """Instrução de REGENERAÇÃO das imagens que o QA reprovou por bug.
+
+    Igual à `_instrucao`, mas (a) diz que estas FALHARAM no QA e por quê, e (b) manda evitar
+    exatamente aquele bug. Os PNGs bugados já foram apagados, então `faltam` = as reprovadas."""
+    base = _instrucao(proj, total, faltam, aspect)
+    linhas_bug = "\n".join("  - img_%03d: %s" % (n, issues.get(str(n), "bug de geração"))
+                           for n in faltam)
+    aviso = (
+        "\n\nATENÇÃO — REGERAÇÃO PÓS-QA: as imagens abaixo foram REPROVADAS por BUG de geração e "
+        "APAGADAS. Gere-as DE NOVO evitando EXATAMENTE o bug apontado (aplique a REGRA ANTI-BUG "
+        "acima com rigor máximo — separação de identidade/roupa entre os personagens, espelho "
+        "coerente, anatomia correta, sem texto):\n%s"
+        % linhas_bug
+    )
+    return base + aviso
 
 
 def run(proj, log, cancel=None, **_):
@@ -137,6 +178,56 @@ def run(proj, log, cancel=None, **_):
             "(as prontas são reaproveitadas)."
             % (len(ainda), ", ".join("img_%03d" % i for i in ainda[:10])))
     log("    ✓ %d imagens em images/ (img_001..img_%03d.png)." % (total, total))
+
+    # QA VISUAL + REGENERAÇÃO: abre cada imagem, detecta bug de geração (identidade trocada,
+    # espelho incoerente, anatomia quebrada, texto) e regera só as bugadas — até N rodadas.
+    # Só checa o que foi (re)gerado AGORA (as que já existiam foram aprovadas em rodadas
+    # anteriores). Vale P1 e P2 (a P2 roda esta mesma etapa na pasta irmã) e todas as categorias.
+    _qa_regen(proj, log, cancel, total, aspect, checar=faltam)
+
+
+def _qa_regen(proj, log, cancel, total, aspect, checar):
+    """Loop QA→apaga bugadas→regera, até ROTEIRO_IMG_QA_MAX_ROUNDS rodadas. Nunca derruba a
+    esteira: se sobrar bug após as rodadas, só avisa alto (imagem presente não bloqueia)."""
+    try:
+        max_rounds = int(float(os.environ.get("ROTEIRO_IMG_QA_MAX_ROUNDS", "2")))
+    except (TypeError, ValueError):
+        max_rounds = 2
+    if max_rounds < 1 or not qa_imagens.ligado():
+        return
+
+    for rodada in range(1, max_rounds + 1):
+        if cancel is not None and cancel.is_set():
+            return
+        veredito = qa_imagens.avaliar(proj, log, cancel, checar=checar)
+        if veredito is None:              # QA errou / sem arquivo → degrada sem bloquear
+            return
+        bugadas = veredito.get("bugged") or []
+        if not bugadas:                   # tudo limpo (ou QA desligado)
+            return
+        if rodada == max_rounds:
+            log("    ⚠ %d imagem(ns) ainda bugada(s) após %d rodada(s) de regeneração: %s. "
+                "Revise à mão ou rode a Etapa 5 de novo (ROTEIRO_IMG_QA_MAX_ROUNDS aumenta as "
+                "tentativas)."
+                % (len(bugadas), max_rounds, ", ".join("img_%03d" % n for n in bugadas)))
+            return
+        issues = veredito.get("issues") or {}
+        for n in bugadas:                 # apaga as bugadas → viram 'faltando' pra regerar
+            try:
+                (proj.images_dir / ("img_%03d.png" % n)).unlink()
+            except OSError:
+                pass
+        log("    ♻ Regenerando %d imagem(ns) bugada(s) (rodada %d/%d): %s"
+            % (len(bugadas), rodada, max_rounds, ", ".join("img_%03d" % n for n in bugadas)))
+        magnific_seam.gerar(proj, log, cancel,
+                            _instrucao_regen(proj, total, bugadas, aspect, issues),
+                            modelo="sonnet")
+        refeitas = [n for n in bugadas
+                    if (proj.images_dir / ("img_%03d.png" % n)).exists()]
+        if not refeitas:
+            log("    ⚠ Regeneração não produziu nenhum PNG novo — parando o loop de QA.")
+            return
+        checar = refeitas                 # na próxima rodada só re-checa o que foi regerado
 
 
 # --- teste standalone: py -3 stages/s5_imagens.py <slug> ------------------------------

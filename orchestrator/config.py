@@ -109,15 +109,27 @@ DEFAULTS = {
     "LONGFORM_TTS_CHUNK": "9000",  # tamanho-alvo de cada bloco de texto (chars) p/ o TTS Magnific
 
     # === roteiro-auto (novo) ================================================
-    # FORMATO DO VÍDEO — o Romance Maker (que esta esteira substitui) produzia VERTICAL
-    # (9:16, app/TikTok). Todos os stages visuais (prompts, imagens, capas, montagem) leem
-    # daqui. Troque p/ 1920x1080 + "16:9" se um canal for horizontal.
-    "ROTEIRO_W": "1080",
-    "ROTEIRO_H": "1920",
-    "ROTEIRO_ASPECT": "9:16",     # aspectRatio do Magnific (Etapa 5) — casa com W×H
+    # FORMATO DO VÍDEO — DEFAULT HORIZONTAL (16:9, YouTube/isca). Todos os stages visuais
+    # (prompts, imagens, capas, montagem) leem daqui. Toda a esteira Editor Auto hoje produz
+    # isca horizontal; o vertical (9:16) era resquício do antigo Romance Maker (app/TikTok) e
+    # virou OPT-IN: um canal que precise de vertical declara em common.CANAL_FORMATO (ou via
+    # env ROTEIRO_W/H/ASPECT). Assim nenhum canal — atual ou novo — sai vertical por acidente.
+    # Mudado 2026-07-10: card 84 (Rowan) saiu vertical porque caía neste default (então 9:16);
+    # a raiz era o default, não só o mapa por canal. Ver decisoes-changelog.
+    "ROTEIRO_W": "1920",
+    "ROTEIRO_H": "1080",
+    "ROTEIRO_ASPECT": "16:9",     # aspectRatio do Magnific (Etapa 5) — casa com W×H
     # Nº de imagens por capítulo (Etapa 4/5). Config do editor = 15; roteirista citou 8.
     # PARAMETRIZÁVEL — o editor confirma (pendência do plano).
     "ROTEIRO_IMAGES_PER_CHAPTER": "8",
+    # QA VISUAL das imagens do corpo (Etapa 5): depois de gerar, o Claude ABRE cada img_NNN.png
+    # e detecta BUG de geração (identidade trocada entre os personagens, reflexo de espelho
+    # incoerente, anatomia quebrada, texto queimado na imagem). As bugadas são APAGADAS e
+    # REGERADAS com regra anti-bug reforçada, até ROTEIRO_IMG_QA_MAX_ROUNDS rodadas. Gasta uso do
+    # Claude (não crédito Magnific). Vale P1 e P2 e todas as categorias. "0" desliga o QA.
+    "ROTEIRO_IMG_QA": "1",
+    "ROTEIRO_IMG_QA_MAX_ROUNDS": "2",     # rodadas de regeneração das imagens bugadas
+    "ROTEIRO_IMG_QA_MODEL": "sonnet",     # modelo do QA visual (opus = mais rigor, + caro em lote)
     # Capas de capítulo (Etapa 6) — specs do config_alves.json → covers.
     "ROTEIRO_COVER_DURACAO_S": "5",       # duração da capa (0.8–8)
     "ROTEIRO_COVER_FPS": "30",
@@ -150,11 +162,12 @@ DEFAULTS = {
     # — é o ANTI-TREMIDO nº1: o zoompan arredonda o pan/zoom p/ pixel INTEIRO desse canvas, então o
     # "pulo" residual em px de saída = 1/supersample (1.0→~1px = TREMIDO visível; 2.0→0,5px = liso).
     # A 1.0 (o valor antigo, escolhido só pensando em nitidez) a câmera "segura e pula" = a tremedeira
-    # que a editora reclamou. 2.0 + o tmix (ROTEIRO_MOTIONBLUR, ligado por padrão no código) fica TÃO
-    # liso quanto 4x a ~metade do custo (medição da esteira long-form). Em notebook 8GB muito lento,
-    # cai p/ 1.5 (o tmix segura o resto) — NÃO volte p/ 1.0 (reintroduz o tremido). Custo: é o maior
-    # peso de CPU do corpo (canvas maior). Ver decisoes-changelog 2026-07-09 (port do Ken Burns long-form).
-    "ROTEIRO_KB_SUPERSAMPLE": "2.0",
+    # que a editora reclamou. 1.5 + o tmix (ROTEIRO_MOTIONBLUR, ligado por padrão no código) fica TÃO
+    # liso quanto 4x/2x a MENOS custo (medição da esteira long-form) — 4px→2.25px = ~40% menos no filtro
+    # mais pesado da Etapa 7. NÃO volte p/ 1.0 (reintroduz o tremido). Custo: é o maior peso de CPU do
+    # corpo (canvas maior). Default REDUZIDO de 2.0→1.5 em 2026-07-10 (gargalo da montagem, qualidade
+    # neutra pelo tmix — ver decisoes-changelog). Ver tb decisoes-changelog 2026-07-09 (port long-form).
+    "ROTEIRO_KB_SUPERSAMPLE": "1.5",
     # Amplitude do Ken Burns (env-tunável; defaults espelham a long-form — a editora pediu p/ SENTIR
     # o movimento). ROTEIRO_KENBURNS_ZOOM = 1.0→1.0+z (zoom); ROTEIRO_KENBURNS_PAN = fração da margem
     # livre usada no pan (0.90 = quase até a borda, sem abrir preto). ROTEIRO_MOTIONBLUR: frames de
@@ -166,7 +179,9 @@ DEFAULTS = {
     # em fila cada corpo usa ~2-3 núcleos e sobra CPU — o gargalo da montagem. N em paralelo ocupa os
     # núcleos livres SEM mudar o output (mesma cadeia de filtros por capítulo). Teto 4 (limite de
     # sessões NVENC simultâneas em placa consumer). 1 = sequencial (comportamento antigo).
-    "ROTEIRO_CORPO_PARALELO": "3",
+    # Default SUBIDO de 3→4 em 2026-07-10 (PC RTX/12 núcleos tinha CPU ociosa). ATENÇÃO 8GB: 4 corpos
+    # podem swapar em notebook 8GB — os .env dos notebooks fixam 3 explicitamente (ver configs-maquinas).
+    "ROTEIRO_CORPO_PARALELO": "4",
     "ROTEIRO_AUDIO_NIVEL": "media",       # limpeza da narração: leve|media|forte|off
     "ROTEIRO_AUDIO_LUFS": "-14",          # loudnorm alvo (padrão da casa)
     "ROTEIRO_AUDIO_TP": "-1.5",           # true peak

@@ -1,0 +1,22 @@
+VISUAL STYLE
+Cinematic dark romance aesthetic: warm candlelight and golden-hour tones against deep shadows. Interiors feature mahogany paneling, crystal chandeliers, and antique velvet upholstery — old Southern money. Outdoor scenes glow copper and amber, heavy with magnolia and river mist. Color palette: navy, deep wine, champagne, and gold accents against warm ivory skin tones.
+
+[Character 1: JAGO QUINT] — the reclusive billionaire hero
+- Face/Hair/Eyes/Skin: strong square jaw with light stubble, straight nose, dark brown eyes with an intense, controlled gaze; short dark hair combed back with calculated carelessness; warm medium skin tone
+- Age/Build: early-to-mid 30s; tall and broad-shouldered, athletic build — not bulky, just commanding presence
+- Signature wardrobe: tailored dark navy suit jacket over a white dress shirt with the top button open, no tie; in casual scenes, white shirt with sleeves folded to the elbow
+- Ref image: referencias/ref_homem_1.png
+
+[Character 2: ROWENA PIKE] — the journalist heroine
+- Face/Hair/Eyes/Skin: oval face with soft features and a natural, warm smile; long dark chestnut hair with soft waves falling past her shoulders; green-hazel eyes; warm medium skin tone with a sun-kissed glow
+- Age/Build: late 20s to early 30s; slender and graceful
+- Signature wardrobe: champagne/taupe satin slip dress (v-neckline, ruched bodice), delicate gold pendant necklace and small gold earrings; in later scenes, a deep wine-red silk dress (straight neckline, elbow-length sleeves)
+- Ref image: referencias/ref_mulher_2.png
+
+[Secondary — EUDORA QUINT] — Jago's formidable matriarch: silver hair pinned back with rigid precision, long black dress, pearl necklace to mid-chest; pale, appraising eyes; aristocratic posture at all times.
+
+[Secondary — ODETTE MARCHAND] — the antagonist socialite: red hair in a polished low bun, emerald-green dress, champagne glass always in hand; smile that never quite reaches her cold eyes.
+
+[Secondary — MARLOWE TRENT] — Rowena's loyal best friend and copy editor: warm presence, quick humor; contrast to the formal Savannah world.
+
+[Secondary — SILAS ASHFORD] — Jago's family lawyer and old friend: tall, young-looking for his role, navy suit without a tie; measured and discreet; the one who manages difficult truths quietly.

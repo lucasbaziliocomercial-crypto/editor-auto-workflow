@@ -1,0 +1,15 @@
+{
+  "card_id": "86aj5f1mr",
+  "modo": "refs_locais",
+  "personagens": [
+    {
+      "genero": "m",
+      "arquivo": "ref_homem_1.png"
+    },
+    {
+      "genero": "f",
+      "arquivo": "ref_mulher_2.png"
+    }
+  ],
+  "capa": "thumb_ref.png"
+}

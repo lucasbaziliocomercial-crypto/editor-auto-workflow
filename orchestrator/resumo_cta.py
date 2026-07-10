@@ -289,7 +289,11 @@ def construir_resumo_p2(proj, base_mat, teaser_clips, w, h, fps, tmp, log, cance
                             seed="resumo:" + proj.dir.name):
         return None
     body = tmp / "_resumo_body.mp4"
-    ok = _mux_video_lead(ff, body_v, aud, body, log)   # takes completos + narração (rabo em silêncio)
+    # A mídia TERMINA JUNTO com a narração (item da editora 2026-07-10: 'quando acaba o texto do
+    # resumo, a mídia continua até o fim dela — que termine junto com o áudio'). MV._mux usa
+    # -shortest: as cenas (que somam >= a narração) são APARADAS na duração do áudio. (Antes o
+    # _mux_video_lead deixava o vídeo liderar e o áudio ganhava silêncio no fim → mídia sobrava.)
+    ok = MV._mux(ff, body_v, aud, body, log)
     body_v.unlink(missing_ok=True)
     if not (ok and body.exists() and body.stat().st_size > 0):
         return None
@@ -339,9 +343,96 @@ def _cta_base(base_mat, modelos):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Layout da CTA: cenas ao fundo (opacidade) + LEGENDA CENTRAL gerada (item da editora 2026-07-10)
+# ---------------------------------------------------------------------------
+# A editora pediu p/ 'adaptar a CTA ao modelo enviado: texto no meio da tela e cenas ao fundo com
+# opacidade em 80%'. Então: as cenas do teaser entram escurecidas (80% opacidade sobre preto) e o
+# TEXTO da CTA aparece CENTRALIZADO — gerado do próprio áudio-base via Whisper (a fala fixa da CTA)
+# e queimado no meio da tela. O áudio continua o fixo do cta_base. A montagem protege este segmento
+# da legenda global re-transcrita (detalhe_segs), então NÃO há legenda dupla (a de baixo + a central).
+
+def _cta_opacidade():
+    """Opacidade das cenas ao fundo da CTA (0..1). Default 0.8 (a editora pediu 80%).
+    Env: ROTEIRO_CTA_OPACITY."""
+    try:
+        return max(0.05, min(1.0, float(os.environ.get("ROTEIRO_CTA_OPACITY", "0.8"))))
+    except (TypeError, ValueError):
+        return 0.8
+
+
+def _aplicar_opacidade(ff, src, op, fps, out, log):
+    """Re-encoda `src` multiplicando o vídeo por `op` (0..1) — 'cenas ao fundo a op×100% de
+    opacidade' sobre preto. Vídeo MUDO. True em sucesso. `colorlevels` com o teto de saída em `op`
+    escala cada canal por `op` (preto continua preto; o brilho cai p/ op×) — o efeito de opacidade
+    sobre fundo preto, numa passada só."""
+    op = max(0.05, min(1.0, op))
+    vf = "colorlevels=romax=%.3f:gomax=%.3f:bomax=%.3f" % (op, op, op)
+    MV._run([ff, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
+             "-vf", vf, *MV._venc_args(fps), "-an", str(out)], log, "cta-opacidade")
+    return out.exists() and out.stat().st_size > 0
+
+
+def _legenda_central_cta(proj, ff, video, audio, w, h, fps, tmp, log):
+    """Transcreve o áudio-base da CTA (Whisper) e queima a legenda CENTRALIZADA (meio da tela)
+    sobre `video`. Devolve o Path legendado (mudo) ou None (o chamador segue sem — vídeo cru).
+    Reusa o fatiamento de UMA linha (MV._preparar_ass) e a fonte/cor da casa, só troca o
+    alinhamento p/ Alignment=5 (meio-centro). `video` e a saída ficam em `tmp` (subtitles roda
+    com cwd=tmp e nomes relativos p/ escapar o ':' do Windows)."""
+    import shutil
+    try:
+        srt = MV._whisper_srt(proj, Path(audio), tmp, log)
+    except Exception as e:
+        log("    ⚠ CTA: Whisper falhou (%s) — sem legenda central." % e)
+        return None
+    if not srt:
+        log("    ⚠ CTA: sem SRT do áudio-base (Whisper) — sem legenda central.")
+        return None
+    try:
+        ass = MV._preparar_ass(ff, srt, MV._caption_max_chars(), w, h)
+    except Exception as e:
+        log("    ⚠ CTA: falha ao preparar a legenda central (%s)." % e)
+        return None
+    fs = os.environ.get("ROTEIRO_CTA_CAPTION_FONTSIZE", str(max(44, int(h * 0.070))))
+    # FONTE e COR PRÓPRIAS da CTA (item da editora 2026-07-10: 'o texto do CTA deve ser centralizado
+    # e com OUTRA FONTE e COR'). Default = distinto do corpo (corpo = Times amarelo): fonte da casa
+    # 'Playfair Display' + BRANCO. Ambos overridáveis por env. Alignment=5 = centro-centro (já era).
+    cta_font = (os.environ.get("ROTEIRO_CTA_CAPTION_FONT", "") or "Playfair Display").strip()
+    _cor = (os.environ.get("ROTEIRO_CTA_CAPTION_COLOR", "") or "").strip()
+    _apel = {"amarelo": "&H0000FFFF", "yellow": "&H0000FFFF",
+             "branco": "&H00FFFFFF", "white": "&H00FFFFFF"}
+    cta_cor = _apel.get(_cor.lower(), _cor) or "&H00FFFFFF"
+    style = ("FontName=%s,Fontsize=%s,Bold=1,PrimaryColour=%s,OutlineColour=&H00000000,"
+             "BackColour=&H64000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=5,MarginV=0"
+             % (cta_font, fs, cta_cor))
+    fontsdir_frag = ""
+    try:
+        _ff_file = MV._fonte_legenda_arquivo(cta_font)
+        if _ff_file:
+            _fdir = tmp / "_fonts"; _fdir.mkdir(exist_ok=True)
+            _dest = _fdir / _ff_file.name
+            if not _dest.exists():
+                shutil.copyfile(_ff_file, _dest)
+            fontsdir_frag = ":fontsdir=_fonts"
+    except Exception:
+        pass
+    out = tmp / "_v_cta_capd.mp4"
+    sub_f = "subtitles=%s%s:force_style='%s'" % (ass.name, fontsdir_frag, style)
+    MV._run([ff, "-y", "-hide_banner", "-loglevel", "error", "-i", Path(video).name,
+             "-vf", sub_f, *MV._venc_args(fps), "-an", out.name], log, "cta-legenda-central", cwd=tmp)
+    if out.exists() and out.stat().st_size > 0:
+        log("    ✓ CTA: legenda central gerada (Whisper do áudio-base, centralizada; fonte=%s, cor=%s)."
+            % (cta_font, cta_cor))
+        return out
+    log("    ⚠ CTA: falha ao queimar a legenda central — seguindo sem.")
+    return None
+
+
 def construir_cta(proj, base_mat, modelos, teaser_clips, w, h, fps, tmp, log, cancel=None):
-    """Gera out/seg_91_cta.mp4 = áudio FIXO da base do canal + clipes do teaser como visual.
-    Devolve o Path do segmento, ou None (o chamador cai no drop-in)."""
+    """Gera out/seg_91_cta.mp4 = áudio FIXO da base do canal + cenas do teaser ao fundo (a
+    _cta_opacidade) + LEGENDA CENTRAL gerada do áudio-base (item 5 da editora: 'texto no meio,
+    cenas ao fundo a 80%'). Devolve o Path do segmento, ou None (o chamador cai no drop-in).
+    A mídia termina JUNTO com o áudio-base (MV._mux -shortest)."""
     ff = achar_ffmpeg()
     seg = tmp / "seg_91_cta.mp4"
     if seg.exists() and seg.stat().st_size > 0:
@@ -370,11 +461,29 @@ def construir_cta(proj, base_mat, modelos, teaser_clips, w, h, fps, tmp, log, ca
                             seed="cta:" + proj.dir.name):
         aud.unlink(missing_ok=True)
         return None
-    ok = _mux_video_lead(ff, vmudo, aud, seg, log)   # takes completos + áudio-base (rabo em silêncio)
-    vmudo.unlink(missing_ok=True)
+
+    # 80% de opacidade nas cenas ao fundo (item 5). Falha → segue com as cenas cheias.
+    op = _cta_opacidade()
+    vbase = vmudo
+    if op < 0.999:
+        vdark = tmp / "_v_cta_dark.mp4"
+        if _aplicar_opacidade(ff, vmudo, op, fps, vdark, log):
+            vbase = vdark
+
+    # LEGENDA CENTRAL gerada (Whisper do áudio-base, centralizada). Falha → vídeo sem legenda
+    # (a montagem NÃO queima a global por cima: a CTA está em detalhe_segs).
+    vcap = _legenda_central_cta(proj, ff, vbase, aud, w, h, fps, tmp, log)
+    vfinal = vcap or vbase
+
+    ok = MV._mux(ff, vfinal, aud, seg, log)   # mídia termina junto com o áudio-base
+    for p in (vmudo, tmp / "_v_cta_dark.mp4", tmp / "_v_cta_capd.mp4"):
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
     aud.unlink(missing_ok=True)
     if ok and seg.exists() and seg.stat().st_size > 0:
-        log("    ✓ CTA gerada (áudio-base '%s' %.1fs + %d take(s) do VEO INTEIROS)."
-            % (base.name, dur, len(teaser_clips)))
+        log("    ✓ CTA gerada (áudio-base '%s' %.1fs + cenas a %d%% + legenda central%s)."
+            % (base.name, dur, int(op * 100), "" if vcap else " (falhou → sem)"))
         return seg
     return None

@@ -1,0 +1,38 @@
+MÚSICA POR SEÇÃO — como nomear as faixas
+=========================================
+
+A montagem toca uma música DIFERENTE em cada momento do vídeo. Você larga as faixas
+(qualquer formato de áudio: mp3/wav/m4a/…) e a esteira identifica O MOMENTO pelo NOME do
+arquivo. Cada faixa toca no SEU trecho no lugar da trilha global.
+
+ONDE LARGAR
+-----------
+- Por canal (recomendado):  materiais/<canal>/musicas/
+    (Rowan e Kay herdam da Lena se a pasta deles estiver vazia.)
+- Global (vale pra todos os canais):  assets/musicas/
+- A trilha GLOBAL de fundo (a de sempre) continua em materiais/<canal>/padronizados/ —
+  ela cobre as seções que NÃO tiverem uma faixa nomeada aqui.
+
+NOMES (o que a esteira reconhece — pode ter acento e espaço)
+------------------------------------------------------------
+- Contém "teaser"          -> toca no TEASER (o gancho do começo).           Volume: -40 dB
+  ex.: "música do teaser.mp3", "musica_teaser.wav"
+- Contém "book" (ou "rabo")-> toca no BOOK 2 (intro book 2 / resumo / CTA /   Volume: -40 dB
+  aviso de clone / tutorial).  ex.: "música do book 2.mp3", "musica_book2.wav"
+- Contém "final" (ou "minuto") -> toca no MINUTO FINAL (a tela de retenção).  Volume: -10 dB (padrão)
+  ex.: "música final.mp3", "musica_minuto_final.wav"
+- Contém "corpo"/"capitulo"/"geral"/"global" (ou só "musica") -> toca nos    Volume: -10 dB (padrão)
+  CAPÍTULOS (a história).  ex.: "música corpo.mp3"
+
+Só o PRIMEIRO arquivo de cada momento é usado. Se um momento não tiver faixa nomeada, ele
+usa a trilha global de padronizados/ (no volume daquele momento). Se não houver nem faixa
+nem trilha global, aquele trecho fica sem música (só a narração).
+
+VOLUMES (ajustáveis por env, se precisar)
+-----------------------------------------
+teaser  = ROTEIRO_MUSICA_TEASER_DB (-40)   book2 = ROTEIRO_MUSICA_BOOK2_DB (-40)
+final   = ROTEIRO_MUSICA_FINAL_DB  (-10)   corpo = ROTEIRO_MUSICA_DB       (-10)
+Desligar a música por seção (voltar à trilha única de antes): ROTEIRO_MUSICA_TIMELINE=0
+
+A faixa é loopada se for mais curta que o trecho, e cortada se for mais longa — não precisa
+casar a duração. A narração/voz fica sempre por cima (a música é leito).

@@ -34,12 +34,19 @@ def run(proj, log, cancel=None, **kw):
     if faltando:
         raise ErroPipeline("Montagem sem pré-requisitos: %s." % ", ".join(faltando))
 
-    import os
-    w = os.environ.get("ROTEIRO_W", "1080"); h = os.environ.get("ROTEIRO_H", "1920")
-    asp = os.environ.get("ROTEIRO_ASPECT", "9:16")
+    import os, time
+    w = os.environ.get("ROTEIRO_W", "1920"); h = os.environ.get("ROTEIRO_H", "1080")
+    asp = os.environ.get("ROTEIRO_ASPECT", "16:9")
     orient = "horizontal" if _int(w) >= _int(h) else "vertical"
     log("▶ Etapa 7 — montagem final (FFmpeg, %sx%s %s / %s)..." % (w, h, asp, orient))
+    _t0 = time.perf_counter()
     montagem_vertical.construir(proj, log, cancel, parte=kw.get("parte"))
+    # Tempo REAL desta montagem (wall-clock) — a editora quer saber quanto a Etapa 7 leva por
+    # máquina (RTX vs notebook Intel) e por parte (P1/P2). Só medição; não muda o render.
+    _el = time.perf_counter() - _t0
+    _rot = str(kw.get("parte") or "").upper()
+    log("    ⏱ Etapa 7 (%s) levou %d min %02d s (wall-clock, esta máquina)."
+        % (_rot or "P1", int(_el // 60), int(_el % 60)))
 
 
 def _int(v, d=0):

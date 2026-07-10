@@ -18,7 +18,7 @@ Gera dois artefatos:
 
 Ancoragem: os prompts são derivados do character_bible.txt (DNA visual, Etapa 2), das fotos de
 referência (referencias/, o thumb HORIZONTAL = personagens) e do roteiro. NUNCA da capa vertical.
-Formato do vídeo (vertical 9:16 por padrão) vem de ROTEIRO_ASPECT.
+Formato do vídeo (horizontal 16:9 por padrão) vem de ROTEIRO_ASPECT.
 
 Contrato: run(proj, log, cancel, **kw). Idempotente (âncora = prompts_imagens.txt).
 """
@@ -40,7 +40,7 @@ def _n_por_cap():
 
 
 def _aspect():
-    return os.environ.get("ROTEIRO_ASPECT", "9:16").strip() or "9:16"
+    return os.environ.get("ROTEIRO_ASPECT", "16:9").strip() or "16:9"
 
 
 def _capitulos(proj):
@@ -110,6 +110,12 @@ REGRAS:
 - As %d imagens de um capítulo devem COBRIR a progressão daquele capítulo (começo→clímax→fim),
   variando cenário/ação, mantendo a aparência dos dois protagonistas travada nas fichas.
 - Romance sensual mas platform-safe: SEM nudez, SEM sexo explícito. Tensão, olhares, quase-beijos.
+- SEM TEXTO NA IMAGEM (regra dura — a editora pegou um frame com letras na tela): a cena NUNCA pode
+  conter texto/palavras/letras legíveis, legenda, título, marca d'água, logotipo, número, relógio
+  digital, placa/letreiro escrito, capa de livro/jornal com título, tela de celular/computador com
+  texto, ou qualquer UI. Descreva SEMPRE cenas puramente visuais. Se o ambiente pediria uma placa
+  ou tela, torne-a em branco/desfocada/fora de quadro. Encerre cada linha reforçando: "no text,
+  no letters, no captions, no watermark, no logos".
 - NÃO gere imagens agora (nem chame Magnific); só ESCREVA o arquivo prompts_imagens.txt.
 - Total esperado: %d linhas.
 

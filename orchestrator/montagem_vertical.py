@@ -67,7 +67,7 @@ def _dim():
             return int(float(os.environ.get(k, d)))
         except ValueError:
             return int(d)
-    return _i("ROTEIRO_W", 1080), _i("ROTEIRO_H", 1920)
+    return _i("ROTEIRO_W", 1920), _i("ROTEIRO_H", 1080)
 
 
 def _fps():
@@ -207,6 +207,34 @@ def _blackgap_fade():
         return max(0.0, float(v))
     except (TypeError, ValueError):
         return 0.3
+
+
+def _respiro_pre_cap():
+    """Se a TELA PRETA de respiro (+fade) também entra na região ANTES da 1ª capa — ou seja, entre
+    a CENA DE ABERTURA↔TEASER e TEASER↔INTRO PÓS TEASER (pedido da editora 2026-07-10: 'transição
+    suave entre a cena animada e o teaser, e entre teaser e intro pós teaser, com espaço de respiro
+    em preto'). Ligado por padrão. Com 0/off volta ao comportamento antigo (abertura/teaser/intro
+    fluíam sem preto — só a partir da 1ª capa é que o respiro ligava). Nunca há preto no arranque
+    absoluto do vídeo (antes do 1º segmento). Env: ROTEIRO_RESPIRO_PRE_CAP."""
+    if _blackgap_dur() <= 0:
+        return False
+    v = os.environ.get("ROTEIRO_RESPIRO_PRE_CAP", "1").strip().lower()
+    return v not in ("0", "off", "none", "nao", "não", "no", "false")
+
+
+def _troca_audio_fade():
+    """Fade curto (s) de entrada/saída no ÁUDIO das bordas dos capítulos (corpo) e da fala do
+    título — mata os 'cortes secos' na troca de capítulo (queixa recorrente da editora 2026-07-10:
+    'alguns áudios, principalmente nas trocas de capítulos, estão com cortes secos'). A narração de
+    um capítulo faz fade-out no fim e o próximo faz fade-in no começo, então a virada (que passa
+    pelo respiro preto) não estala. Default 0.15s; 0/off = corte seco. Env: ROTEIRO_TROCA_AUDIO_FADE."""
+    v = os.environ.get("ROTEIRO_TROCA_AUDIO_FADE", "0.15").strip().lower()
+    if v in ("0", "off", "none", "nao", "não", "no", "false", ""):
+        return 0.0
+    try:
+        return max(0.0, float(v))
+    except (TypeError, ValueError):
+        return 0.15
 
 
 def _fim_cenas_n():
@@ -613,12 +641,24 @@ def _boundaries(proj, ff, log):
     return total, bnds
 
 
-def _slice_audio(ff, src, ini, fim, out, log):
-    """Corta [ini, fim) de src -> out (AAC uniforme). fim=None => até o fim."""
+def _slice_audio(ff, src, ini, fim, out, log, fade=0.0, dur=None):
+    """Corta [ini, fim) de src -> out (AAC uniforme). fim=None => até o fim.
+
+    `fade` (s) > 0 aplica afade-IN no começo e afade-OUT no fim da fatia — suaviza a borda pra a
+    troca de capítulo não estalar ('cortes secos', queixa da editora 2026-07-10). O afade-out
+    precisa saber o comprimento da fatia: usa `dur` (se dado) ou `fim-ini`; sem nenhum dos dois
+    (fatia aberta até o fim) só o afade-in entra."""
     cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-ss", "%.3f" % ini]
     if fim is not None:
         cmd += ["-to", "%.3f" % fim]
-    cmd += ["-i", str(src), *_AENC, str(out)]
+    cmd += ["-i", str(src)]
+    if fade and fade > 0:
+        L = dur if dur else ((fim - ini) if fim is not None else None)
+        af = ["afade=t=in:st=0:d=%.3f" % fade]
+        if L and L > 2.2 * fade:            # só faz out-fade se a fatia comporta os dois sem colar
+            af.append("afade=t=out:st=%.3f:d=%.3f" % (max(0.0, L - fade), fade))
+        cmd += ["-af", ",".join(af)]
+    cmd += [*_AENC, str(out)]
     _run(cmd, log, "slice-audio")
     return out.exists() and out.stat().st_size > 0
 
@@ -633,12 +673,26 @@ def _silencio(ff, dur, out, log):
 
 
 def _audio_titulo(ff, src, dur, out, log):
-    """Áudio da capa = a fala do título (src, covers/titulo_NN.mp3) no COMEÇO + silêncio até
-    `dur` (AAC uniforme). A narradora anuncia 'Chapter N — Título' enquanto a capa está na
-    tela; o respiro no fim (dur > fala) vira a pausa dramática antes do capítulo. `-t dur`
-    fixa a duração no comprimento do vídeo da capa (mux casa exato)."""
+    """Áudio da capa = (respiro de silêncio de _cover_lead s) + a fala do título (src,
+    covers/titulo_NN.mp3) + silêncio até `dur` (AAC uniforme). A narradora anuncia
+    'Chapter N — Título' enquanto a capa está na tela; o lead-in no começo separa o 'Chapter'
+    do fim do segmento anterior (queixa da editora: 'cha' colado no teaser), e o respiro no fim
+    (dur > lead+fala) vira a pausa dramática antes do capítulo. `-t dur` fixa a duração no
+    comprimento do vídeo da capa (mux casa exato)."""
+    lead = _cover_lead()
+    chain = []
+    if lead > 0.01:
+        ms = int(round(lead * 1000))
+        chain.append("adelay=%d|%d" % (ms, ms))   # empurra a fala p/ depois do respiro inicial
+    # fade-in curto na fala do título (anti-'corte seco' na troca de capítulo, item da editora
+    # 2026-07-10): entra logo após o respiro inicial (st=lead). O fim já cai em silêncio (apad),
+    # então não precisa de fade-out. Sem fade configurado, segue como antes.
+    _tf = _troca_audio_fade()
+    if _tf > 0:
+        chain.append("afade=t=in:st=%.3f:d=%.3f" % (max(0.0, lead), _tf))
+    chain.append("apad")
     cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
-           "-af", "apad", "-t", "%.3f" % max(0.05, dur), *_AENC, str(out)]
+           "-af", ",".join(chain), "-t", "%.3f" % max(0.05, dur), *_AENC, str(out)]
     _run(cmd, log, "audio-titulo")
     return out.exists() and out.stat().st_size > 0
 
@@ -647,7 +701,7 @@ def _audio_titulo(ff, src, dur, out, log):
 # Efeito sonoro FIXO que toca no COMEÇO de cada capa de troca (junto com o "Chapter N — Título"),
 # marcando a virada de capítulo. Insumo por-vídeo/canal/global (troca_capitulo.<ext>):
 #   projects/<slug>/sfx/ > materiais/<canal>/sfx/ (+ herdada) > assets/sfx/  (global default)
-# Kill-switch ROTEIRO_SFX_TROCA=0. Volume ROTEIRO_SFX_TROCA_VOL (default 1.0).
+# Kill-switch ROTEIRO_SFX_TROCA=0. Volume: ROTEIRO_SFX_TROCA_DB (default -25 dB).
 _SFX_TROCA_NOMES = ("troca_capitulo", "troca-capitulo", "sfx_troca", "sfx-troca", "sfx_por_cap")
 
 def _sfx_troca_on():
@@ -656,10 +710,20 @@ def _sfx_troca_on():
 
 
 def _sfx_troca_vol():
+    """Ganho LINEAR do SFX de troca no mix da capa. Default -25 dB (a editora achou o efeito
+    alto demais no volume cheio — 2026-07-10): ROTEIRO_SFX_TROCA_DB ajusta em dB (default -25).
+    ROTEIRO_SFX_TROCA_VOL, se setado, SOBREPÕE como multiplicador linear cru (compat antiga)."""
+    lin = os.environ.get("ROTEIRO_SFX_TROCA_VOL")
+    if lin is not None and lin.strip() != "":
+        try:
+            return max(0.0, float(lin))
+        except (TypeError, ValueError):
+            pass
     try:
-        return max(0.0, float(os.environ.get("ROTEIRO_SFX_TROCA_VOL", "1.0")))
+        db = float(os.environ.get("ROTEIRO_SFX_TROCA_DB", "-25"))
     except (TypeError, ValueError):
-        return 1.0
+        db = -25.0
+    return 10.0 ** (db / 20.0)
 
 
 def _achar_sfx_troca(dirs):
@@ -746,14 +810,17 @@ def _kb_expr(mode, frames):
 def _kb_supersample(w, h):
     """Dimensões do canvas que o zoompan lê ANTES do zoom. É o ANTI-TREMIDO nº1: o zoompan arredonda
     o pan/zoom p/ pixel INTEIRO do quadro interno; o "pulo" residual em px de saída = 1/supersample
-    (1.25x→~0,8px = tremido VISÍVEL; 2x→0,5px; 4x→0,25px). Port da long-form: default 2x +, junto do
-    tmix (_kb_motionblur), fica TÃO liso quanto 4x a ~metade do custo. Sobe até 4x se a máquina aguentar.
-    Env: ROTEIRO_KB_SUPERSAMPLE (aceita tb LONGFORM_FFMPEG_UPSCALE; 1.0 = sem, o mais rápido/trêmulo)."""
+    (1.25x→~0,8px = tremido VISÍVEL; 1.5x→~0,66px; 2x→0,5px; 4x→0,25px). Port da long-form: default 1.5x
+    (reduzido de 2x em 2026-07-10, gargalo da montagem) +, junto do tmix (_kb_motionblur), fica liso a
+    ~40% menos custo no filtro mais pesado. Sobe até 4x se a máquina aguentar.
+    No notebook Intel/8GB o env por-máquina (configs-maquinas/notebook-intel-i5-13420h.env) baixa p/ 1.5
+    (o tmix segura o liso) — enxuga ~40% do filtro mais pesado da Etapa 7. NÃO ir p/ 1.0 (reintroduz o
+    tremido). Env: ROTEIRO_KB_SUPERSAMPLE (aceita tb LONGFORM_FFMPEG_UPSCALE; 1.0 = sem, o mais rápido)."""
     try:
         ss = float(os.environ.get("ROTEIRO_KB_SUPERSAMPLE",
-                                  os.environ.get("LONGFORM_FFMPEG_UPSCALE", "2.0")))
+                                  os.environ.get("LONGFORM_FFMPEG_UPSCALE", "1.5")))
     except (TypeError, ValueError):
-        ss = 2.0
+        ss = 1.5
     ss = max(1.0, min(4.0, ss))
     return (int(round(w * ss)) // 2) * 2, (int(round(h * ss)) // 2) * 2  # pares (yuv420p)
 
@@ -804,11 +871,11 @@ def _corpo_paralelo():
     N corpos em paralelo ocupa os núcleos livres SEM mudar o output (cada capítulo é a MESMA chamada
     _kenburns_imagens; muda só o agendamento). Teto 4 por causa do limite de sessões NVENC
     simultâneas em placas consumer (driver antigo trava em 3). 1 = sequencial (comportamento antigo).
-    Env: ROTEIRO_CORPO_PARALELO (default 3)."""
+    Env: ROTEIRO_CORPO_PARALELO (default 4 desde 2026-07-10; notebooks 8GB fixam 3 no .env por RAM)."""
     try:
-        v = int(float(os.environ.get("ROTEIRO_CORPO_PARALELO", "3")))
+        v = int(float(os.environ.get("ROTEIRO_CORPO_PARALELO", "4")))
     except (TypeError, ValueError):
-        v = 3
+        v = 4
     return max(1, min(4, v))
 
 
@@ -961,6 +1028,35 @@ def _video_ajustado(ff, src, dur, w, h, fps, out, log, mudo=True, fade=None):
     return out.exists() and out.stat().st_size > 0
 
 
+def _seg_com_fade(ff, seg, fin, fout, fps, tmp, log):
+    """Re-encoda `seg` (vídeo+áudio já finalizado) adicionando fade-in←preto (fin s) e/ou
+    fade-out→preto (fout s) nas BORDAS do vídeo — o áudio é COPIADO (`-c:a copy`). Suaviza o dip
+    pro preto das peças que encostam na TELA PRETA de respiro mas não têm fade próprio (rabo da
+    isca, abertura, cenas finais, intros) — pedido da editora 'transições suaves em todos os
+    momentos' (2026-07-10). Idempotente/cacheado (chave = stem + durações). Devolve o Path faded,
+    ou o próprio `seg` se não há o que fazer / falhou."""
+    fin = max(0.0, fin or 0.0); fout = max(0.0, fout or 0.0)
+    if fin <= 0.01 and fout <= 0.01:
+        return seg
+    dur = _dur(ff, seg)
+    if dur <= 0.2:
+        return seg
+    fin = min(fin, dur / 2.0); fout = min(fout, dur / 2.0)
+    tag = "%s_fade_%s_%s" % (seg.stem, ("%.2f" % fin).replace(".", "p"),
+                             ("%.2f" % fout).replace(".", "p"))
+    out = tmp / (tag + ".mp4")
+    if _seg_fresco(out, seg):
+        return out
+    vf = []
+    if fin > 0.01:
+        vf.append("fade=t=in:st=0:d=%.3f:color=black" % fin)
+    if fout > 0.01:
+        vf.append("fade=t=out:st=%.3f:d=%.3f:color=black" % (max(0.0, dur - fout), fout))
+    _run([ff, "-y", "-hide_banner", "-loglevel", "error", "-i", str(seg),
+          "-vf", ",".join(vf), *_venc_args(fps), "-c:a", "copy", str(out)], log, "seg-fade")
+    return out if (out.exists() and out.stat().st_size > 0) else seg
+
+
 # ---------------------------------------------------------------------------
 # TEASER sincronizado às FRASES do gancho (não mais divisão igual)
 # ---------------------------------------------------------------------------
@@ -1091,11 +1187,39 @@ def _hook_beats(proj, ff, hook_dur, log):
 def _teaser_min_corte():
     """Duração mínima (s) de um corte do teaser. Frases muito curtas do gancho ("Wanted.",
     "Dangerous.") são fundidas com a seguinte até atingir esse piso — evita flashes subliminais
-    de clipe. Env ROTEIRO_TEASER_MIN_CORTE (default 0.8s; 0 = não funde, corta em toda frase)."""
+    de clipe. Default 0.6s (a editora pediu 'cortes um pouco menor' — 2026-07-10; era 0.8).
+    Env ROTEIRO_TEASER_MIN_CORTE (0 = não funde, corta em toda frase)."""
     try:
-        return max(0.0, float(os.environ.get("ROTEIRO_TEASER_MIN_CORTE", "0.8")))
+        return max(0.0, float(os.environ.get("ROTEIRO_TEASER_MIN_CORTE", "0.6")))
     except (TypeError, ValueError):
-        return 0.8
+        return 0.6
+
+
+def _teaser_tail_trim():
+    """Quanto (s) ENCURTAR o fim do áudio do teaser, puxando o corte p/ ANTES da fronteira do
+    capítulo 1. A editora ouvia um 'cha…' (o começo do 'Chapter' anunciado na capa) colado no fim
+    do teaser: o slice do teaser terminava exatamente na virada e encostava na fala da capa. Este
+    respiro tira o rabo do teaser p/ o 'Chapter N' soar limpo SÓ na entrada do capítulo (a capa).
+    Default 0.20s; 0/off desliga. Env: ROTEIRO_TEASER_TAIL_TRIM."""
+    v = os.environ.get("ROTEIRO_TEASER_TAIL_TRIM", "0.2").strip().lower()
+    if v in ("0", "off", "none", "nao", "não", "no", "false", ""):
+        return 0.0
+    try:
+        return max(0.0, float(v))
+    except (TypeError, ValueError):
+        return 0.2
+
+
+def _cover_lead():
+    """Respiro de silêncio (s) ANTES do 'Chapter N — Título' dentro da capa. Dá uma pausa curta
+    entre o segmento anterior e o anúncio do capítulo, p/ o 'Chapter' cair claramente na ENTRADA
+    do capítulo e não colado no fim do teaser/corpo anterior (queixa da editora 2026-07-10 — 'cha'
+    vazando). Cabe no respiro que a Etapa 6 já reserva no fim da capa. Default 0.25s; 0 desliga.
+    Env: ROTEIRO_COVER_LEAD."""
+    try:
+        return max(0.0, float(os.environ.get("ROTEIRO_COVER_LEAD", "0.25")))
+    except (TypeError, ValueError):
+        return 0.25
 
 
 def _agrupar_por_min(beats, min_dur):
@@ -1353,6 +1477,59 @@ def _whisper_srt(proj, audio, tmp, log):
     return srt if (srt.exists() and srt.stat().st_size > 0) else None
 
 
+def _qr_bbox_frame(qr_img, w, h):
+    """(x0, y0, x1, y1) da região OPACA do QR em coords do FRAME w×h. Assume FIT=1 (o PNG é
+    full-frame e escalado pro frame inteiro), então a bbox nativa é reescalada por w/W, h/H.
+    None se não der pra medir (PIL ausente, sem alpha, etc.)."""
+    try:
+        from PIL import Image
+        im = Image.open(str(qr_img)).convert("RGBA")
+        bb = im.split()[3].getbbox()   # bbox dos pixels com alpha > 0
+        if not bb:
+            return None
+        W, H = im.size
+        x0, y0, x1, y1 = bb
+        sx, sy = (w / W if W else 1.0), (h / H if H else 1.0)
+        return (int(x0 * sx), int(y0 * sy), int(x1 * sx), int(y1 * sy))
+    except Exception:
+        return None
+
+
+def _legenda_margens_qr(qr_img, w, h):
+    """Margens (MarginL, MarginR, MarginV) a aplicar na legenda p/ ela NÃO cruzar a coluna do QR
+    (a editora: 'o QR num lugar que a legenda não atrapalhe o vídeo inteiro'). Mede a bbox opaca do
+    QR; se ela invade a faixa vertical da legenda (terço inferior), empurra a legenda pro lado
+    OPOSTO (MarginR se o QR está à direita, MarginL se à esquerda). Se não sobra largura útil (QR
+    largo/central), sobe a legenda p/ ACIMA do QR (MarginV). (0,0,0) se não precisa / não mediu.
+    Só vale com FIT=1 (QR full-frame posicionado no PNG); FIT=0 não auto-ajusta. Env de folga:
+    ROTEIRO_QR_LEGENDA_PAD (px)."""
+    try:
+        import qr_overlay
+        if not qr_overlay._fit():
+            return (0, 0, 0)
+    except Exception:
+        pass
+    bb = _qr_bbox_frame(qr_img, w, h)
+    if not bb:
+        return (0, 0, 0)
+    x0, y0, x1, y1 = bb
+    try:
+        pad = max(10, int(os.environ.get("ROTEIRO_QR_LEGENDA_PAD", str(int(w * 0.02)))))
+    except (TypeError, ValueError):
+        pad = int(w * 0.02)
+    # A legenda mora no terço inferior; se o QR fica todo ACIMA dele, não há conflito.
+    if y1 < h * 0.72:
+        return (0, 0, 0)
+    # CENTRALIZADA (pedido da editora 2026-07-10: 'legenda centralizada'). Antes empurrávamos a
+    # legenda pro lado OPOSTO ao QR (MarginL/MarginR) — mas isso a descentraliza. Agora mantemos o
+    # centro horizontal (sem MarginL/R) e SUBIMOS a legenda pra ACIMA do topo do QR (MarginV alto),
+    # então ela fica centrada E o QR (canto inferior) segue livre/escaneável. Nunca desce abaixo do
+    # MarginV padrão (~0.14·h): usamos o maior entre o padrão e o necessário pra limpar o QR.
+    base_mv = int(h * 0.14)
+    needed = int(h - y0) + pad          # bottom da legenda acima do topo do QR (y0)
+    return (0, 0, max(base_mv, needed))
+
+
 def _legendar(proj, ff, video_montado, tmp, w, h, fps, log, qr_img=None, qr_frag=None,
               mudos_ranges=None):
     """Queima a legenda no vídeo MONTADO. Como a montagem insere capas (silêncio) entre os
@@ -1380,6 +1557,22 @@ def _legendar(proj, ff, video_montado, tmp, w, h, fps, log, qr_img=None, qr_frag
         return None
     out = tmp / "_capd.mp4"
     style = _legenda_style(w, h)
+    # QR-AWARE: quando há QR fixo (isca P1), a legenda não pode CRUZAR a coluna do QR (a editora
+    # 2026-07-10: 'o QR tem que ficar num lugar que a legenda não atrapalhe o vídeo inteiro'). O QR
+    # fica num canto (medido: inferior-DIREITA); empurramos a legenda pro lado oposto (MarginR) — e
+    # o QR segue POR CIMA (escaneável). Assim os dois convivem sem se tapar em nenhum frame.
+    if qr_img is not None:
+        _mL, _mR, _mV = _legenda_margens_qr(qr_img, w, h)
+        _extra = []
+        if _mR > 0:
+            _extra.append("MarginR=%d" % _mR)
+        if _mL > 0:
+            _extra.append("MarginL=%d" % _mL)
+        if _mV > 0:
+            _extra.append("MarginV=%d" % _mV)   # fallback: sobe a legenda acima do QR
+        if _extra:
+            style += "," + ",".join(_extra)
+            log("    legenda: centralizada e elevada acima do QR (%s) — QR fica escaneável." % ", ".join(_extra))
     maximo = _caption_max_chars()
     ass = _preparar_ass(ff, srt, maximo, w, h)  # UMA linha só (≤ maximo), padrão long form
     # Peças com legenda própria (tutorial/intros/aviso de clone): dropa os blocos re-transcritos
@@ -1405,7 +1598,11 @@ def _legendar(proj, ff, video_montado, tmp, w, h, fps, log, qr_img=None, qr_frag
         log("    ⚠ fonte da legenda não pôde ser preparada (%s) — usando fontconfig do sistema." % e)
     sub_f = "subtitles=%s%s:force_style='%s'" % (ass.name, fontsdir_frag, style)
     if qr_img is not None and qr_frag is not None:
-        # Legenda + QR na MESMA passada: [0:v]->subtitles->[s]; [1:v]->QR->[qr]; overlay.
+        # Legenda + QR na MESMA passada, com o QR POR CIMA (escaneável): [0:v]->subtitles->[s];
+        # [1:v]->QR->[qr]; [s][qr]overlay->[v]. A legenda JÁ foi afastada da coluna do QR (margens
+        # QR-aware acima), então eles NÃO se cruzam em nenhum frame — o QR por cima não tapa a
+        # legenda, e a legenda não invade o QR. (Não basta ordem de composição; a separação é
+        # ESPACIAL — a editora quer o QR num lugar que a legenda não atrapalhe o vídeo inteiro.)
         prep, qx, qy = qr_frag  # prep produz o label [qr] a partir do input 1
         # -loop 1 no PNG do QR + shortest=1 no overlay: a imagem estática vira um stream que
         # dura o vídeo INTEIRO (sem -loop ela é 1 frame só e o QR sumia após o teaser). O vídeo
@@ -1528,6 +1725,43 @@ def construir(proj, log, cancel=None, parte=None):
             _teaser_cache["v"] = _teaser_limpo(ff, crus, fps, tmp, log)
         return _teaser_cache["v"]
 
+    def _seg_abertura(permitir_ia):
+        """CENA DE ABERTURA (antes do teaser na P1 / 1º segmento da P2): um take do teaser COM
+        áudio, tocado com o PRÓPRIO diálogo (o de-Veo preserva a faixa, `-c:a copy`). Fallback:
+        clipe largado pela editora em projects/<slug>/abertura/, ou (só P2, opt-in crédito) o
+        thumbnail animado por IA. Devolve o Path do seg pronto (vídeo+áudio) ou None — a montagem
+        segue graciosamente sem cena de abertura. Ver abertura.py."""
+        import abertura
+        try:
+            candidato = abertura.selecionar_teaser_com_audio(
+                _teaser_clips(), lambda c: _tem_audio(ff, c))
+            ab_clip = abertura.garantir_clip(
+                proj, log, cancel, teaser_com_audio=candidato, permitir_ia=permitir_ia)
+        except Exception as e:
+            log("    ⚠ abertura: %s — seguindo sem cena de abertura." % e)
+            return None
+        if not ab_clip:
+            return None
+        seg = _seg_path("00_abertura")
+        if not _seg_fresco(seg, Path(ab_clip)):
+            if _tem_audio(ff, ab_clip):
+                # cena COM diálogo: mantém o áudio do próprio clipe (a música global entra por baixo
+                # no mix final) e toca o take INTEIRO — a fala não pode ser cortada no meio.
+                _video_ajustado(ff, ab_clip, None, w, h, fps, seg, log, mudo=False)
+            else:
+                # clipe mudo (ex.: thumbnail animado por IA): silêncio; a música cobre.
+                vmudo = tmp / "_v_abertura.mp4"
+                _video_ajustado(ff, ab_clip, None, w, h, fps, vmudo, log, mudo=True)
+                aud = tmp / "_a_abertura.m4a"
+                _silencio(ff, _dur(ff, vmudo), aud, log)
+                _mux(ff, vmudo, aud, seg, log)
+                vmudo.unlink(missing_ok=True); aud.unlink(missing_ok=True)
+        if seg.exists() and seg.stat().st_size > 0:
+            log("    ABERTURA (cena animada%s) adicionada (%.1fs)."
+                % (" com diálogo" if _tem_audio(ff, seg) else "", _dur(ff, seg)))
+            return seg
+        return None
+
     # mapa capítulo -> imagens (via prefixo C<n>| dos prompts, na ordem = img_NNN)
     imgs_por_cap = {c["n"]: [] for c in caps}
     if proj.existe(proj.prompts_imagens):
@@ -1582,29 +1816,21 @@ def construir(proj, log, cancel=None, parte=None):
     # --- 1) TEASER (gancho) — SÓ na isca (P1). A extensão (P2) abre com a CENA ANIMADA. -----
     if extensao:
         log("    P2 (extensão): sem teaser-isca — o capítulo 1 começa do 0.")
-        # ABERTURA do book 2 (2026-07-10): o thumbnail do card ANIMADO (image->video por IA, ou um
-        # clipe que a editora largou em projects/<slug>/abertura/). Entra como 1º segmento; o passe
-        # de TELA PRETA insere sozinho o respiro entre a abertura e a capa 1 (dentro=True só na capa).
-        # Sem clipe/insumo/crédito, abertura.garantir_clip devolve None → P2 abre direto na capa (como antes).
-        ab_clip = None
-        try:
-            import abertura
-            ab_clip = abertura.garantir_clip(proj, log, cancel)
-        except Exception as e:
-            log("    ⚠ abertura: %s — seguindo sem abertura." % e)
-        if ab_clip:
-            seg = _seg_path("00_abertura")
-            if not _seg_fresco(seg, Path(ab_clip)):
-                vmudo = tmp / "_v_abertura.mp4"
-                _video_ajustado(ff, ab_clip, None, w, h, fps, vmudo, log, mudo=True)
-                aud = tmp / "_a_abertura.m4a"
-                _silencio(ff, _dur(ff, vmudo), aud, log)   # sem narração; a música global cobre
-                _mux(ff, vmudo, aud, seg, log)
-                vmudo.unlink(missing_ok=True); aud.unlink(missing_ok=True)
-            if seg.exists() and seg.stat().st_size > 0:
-                segmentos.append(seg)
-                log("    ABERTURA (thumbnail animado) adicionada (%.1fs)." % _dur(ff, seg))
+        # CENA DE ABERTURA do book 2 (2026-07-10): 1º take do teaser COM áudio (o diálogo do VEO)
+        # tocado com o próprio som; fallback = clipe largado pela editora, ou (opt-in crédito) o
+        # thumbnail animado por IA. Entra como 1º segmento; o passe de TELA PRETA insere sozinho o
+        # respiro antes da capa 1. Sem take/clipe → P2 abre direto na capa (como antes).
+        seg_ab = _seg_abertura(permitir_ia=True)
+        if seg_ab:
+            segmentos.append(seg_ab)
     else:
+        # CENA DE ABERTURA da isca (2026-07-10): ANTES do teaser, um take do teaser COM áudio (o
+        # diálogo do VEO) tocado com o próprio som — cold-open falado. Fallback = clipe largado pela
+        # editora. NÃO gera por IA na P1 (permitir_ia=False). Sem take com áudio → sem abertura (a
+        # isca abre direto no teaser, como antes). Flui pro teaser sem preto (ambos antes da 1ª capa).
+        seg_ab = _seg_abertura(permitir_ia=False)
+        if seg_ab:
+            segmentos.append(seg_ab)
         hook_dur = max(1.0, bnds[0]) if bnds else min(8.0, total)
         # Teaser é POR VÍDEO: lê de projects/<slug>/teaser/ (isolado deste card). Só cai no
         # drop-in por canal (materiais/<canal>/teaser/) como fallback legado, se o projeto não tiver.
@@ -1624,7 +1850,12 @@ def construir(proj, log, cancel=None, parte=None):
                 log("    ⚠ sem clipes de teaser (projects/<slug>/teaser/ nem materiais/%s/teaser/)"
                     " — gancho vira Ken Burns da 1ª imagem." % base_mat.name)
             aud = tmp / "_a_teaser.m4a"
-            _slice_audio(ff, proj.narration_mp3, 0.0, hook_dur, aud, log)
+            # Encurta o rabo do teaser (ROTEIRO_TEASER_TAIL_TRIM) p/ o 'Chapter' anunciado na capa
+            # não colar no fim do teaser (queixa da editora: 'cha' vazando). O -shortest do _mux
+            # apara o vídeo junto — o teaser fica um tico mais curto ('cortes um pouco menor').
+            tt = _teaser_tail_trim()
+            fim_teaser = max(0.5, hook_dur - tt) if tt > 0 else hook_dur
+            _slice_audio(ff, proj.narration_mp3, 0.0, fim_teaser, aud, log)
             _mux(ff, vmudo, aud, seg, log)
             vmudo.unlink(missing_ok=True); aud.unlink(missing_ok=True)
         segmentos.append(seg)
@@ -1702,7 +1933,10 @@ def construir(proj, log, cancel=None, parte=None):
             # o vídeo pode sair um tico maior/menor que dur (arredondamento de frames);
             # a fatia de áudio manda — usamos -shortest no mux.
             aud = tmp / ("_a_corpo_%02d.m4a" % n)
-            _slice_audio(ff, proj.narration_mp3, ini, fim, aud, log)
+            # fade curto nas bordas da narração do capítulo (anti-'corte seco' na troca, item da
+            # editora 2026-07-10): fade-in no começo, fade-out no fim (dur = tamanho do corpo).
+            _slice_audio(ff, proj.narration_mp3, ini, fim, aud, log,
+                         fade=_troca_audio_fade(), dur=dur)
             _mux(ff, vmudo, aud, s, log)
             vmudo.unlink(missing_ok=True); aud.unlink(missing_ok=True)
             return s
@@ -1838,10 +2072,20 @@ def construir(proj, log, cancel=None, parte=None):
             cta = resumo_cta.construir_cta(proj, base_mat, modelos, teaser_clips, w, h, fps, tmp, log, cancel)
         except Exception as e:
             log("    ⚠ CTA (geração) falhou (%s) — tentando drop-in." % e)
+        # A CTA GERADA já traz a legenda central própria (Whisper do áudio-base, centralizada sobre
+        # as cenas a 80% — item 5 da editora): protege da legenda global re-transcrita (senão dobra).
+        cta_legenda_propria = cta is not None
         if not cta:
             cta = _drop_seg("91_cta", "cta", "cta_final")
         if cta:
-            segmentos.append(cta); log("    CTA adicionada.")
+            segmentos.append(cta)
+            if cta_legenda_propria:
+                detalhe_segs.add(cta)
+                log("    CTA adicionada (GERADA — legenda central própria, centralizada).")
+            else:
+                log("    CTA adicionada (DROP-IN — vídeo-template com texto embutido; se o texto "
+                    "estiver no canto, é do template, não da esteira: revise materiais/%s/cta/)."
+                    % base_mat.name)
         else:
             log("    (sem CTA — sem clipes de teaser + base cta_base.mp4 em materiais/%s/cta/, e "
                 "sem drop-in/modelo cta_final)." % base_mat.name)
@@ -1881,17 +2125,48 @@ def construir(proj, log, cancel=None, parte=None):
     # por baixo do preto no mix final → respiro COM trilha. As bordas de capa/corpo fazem fade
     # pro/do preto (_blackgap_fade) p/ o dip não ser seco; as peças do rabo entram com corte no preto.
     blk = _blackgap_seg()
+    _fe = _blackgap_fade()
     if blk is not None:
+        # 1) insere o preto ANTES de cada segmento. Com ROTEIRO_RESPIRO_PRE_CAP (padrão), o respiro
+        # liga já no 2º segmento — ou seja, também entre a CENA DE ABERTURA↔TEASER e TEASER↔INTRO PÓS
+        # TEASER (pedido da editora 2026-07-10). Desligado, o comportamento antigo: respiro só do 1º
+        # capítulo (1ª capa) em diante — a abertura/teaser/intro fluíam sem preto. Em ambos os casos
+        # nunca há preto no arranque absoluto (antes do 1º segmento: `novos` ainda vazio).
+        pre = _respiro_pre_cap()
         novos, dentro, n_pretos = [], False, 0
         for s in segmentos:
-            if not dentro and "_capa" in s.name:
-                dentro = True                       # chegou o 1º capítulo: liga os respiros
+            if not dentro and (pre or "_capa" in s.name):
+                dentro = True                       # liga os respiros (na abertura se `pre`, senão na 1ª capa)
             if dentro and novos:                    # preto ANTES deste seg (menos no 1º da região)
                 novos.append(blk); n_pretos += 1
             novos.append(s)
+        # 2) fade ←/→ preto nas BORDAS das peças que encostam no respiro preto e ainda NÃO têm fade
+        # próprio (rabo da isca, abertura, cenas finais, intros). Capa/corpo já fazem fade no próprio
+        # render → pulados aqui (não dobra). Pedido da editora: 'transições suaves em todos os
+        # momentos' (2026-07-10) — antes só a capa/corpo faziam, o rabo entrava com corte seco no preto.
+        n_fades = 0
+        if _fe > 0:
+            remap = {}
+            for i, s in enumerate(novos):
+                if s is blk or "_capa" in s.name or "_corpo" in s.name:
+                    continue
+                prev_blk = i > 0 and novos[i - 1] is blk
+                next_blk = i < len(novos) - 1 and novos[i + 1] is blk
+                if not (prev_blk or next_blk):
+                    continue
+                fs = _seg_com_fade(ff, s, _fe if prev_blk else 0.0,
+                                   _fe if next_blk else 0.0, fps, tmp, log)
+                if fs is not s:
+                    remap[id(s)] = fs
+                    if s in detalhe_segs:
+                        detalhe_segs.add(fs)   # mantém a proteção de legenda própria após o fade
+                    n_fades += 1
+            if remap:
+                novos = [remap.get(id(x), x) for x in novos]
         segmentos = novos
-        log("    tela preta de respiro: %d corte(s) de %.1fs entre os segmentos (fade %.1fs)."
-            % (n_pretos, _blackgap_dur(), _blackgap_fade()))
+        log("    tela preta de respiro: %d corte(s) de %.1fs entre os segmentos "
+            "(fade %.1fs; %d borda[s] do rabo/abertura suavizada[s])."
+            % (n_pretos, _blackgap_dur(), _fe, n_fades))
 
     concat = _concat_segmentos(ff, segmentos, tmp, fps, log)
 
@@ -1949,12 +2224,34 @@ def construir(proj, log, cancel=None, parte=None):
             log("    ⚠ QR não aplicado (%s) — seguindo sem QR." % e)
 
     # --- 6) ÁUDIO tratado (cleanup+loudnorm) + MÚSICA -> final ----------------
-    musica = _musica(base_mat, modelos)
+    musica = _musica(base_mat, modelos)   # trilha GLOBAL (padronizados) — bed/fallback
     final = proj.final_mp4
     limpeza = _audio_limpeza()   # só a limpeza da narração (loudnorm vem por último, no bus)
     ln = _audio_loudnorm()       # loudnorm final (define o volume) — aplicado depois do amix
     af = _audio_filtro()         # limpeza+loudnorm juntos (caminho SEM música)
-    if musica:
+
+    # MÚSICA POR SEÇÃO (2026-07-10): faixas nomeadas em materiais/<canal>/musicas/ tocam no SEU
+    # trecho NO LUGAR da trilha global — 'música do teaser'/'música do book 2' como leito baixo
+    # (-40 dB) sob a fala, 'música final' no minuto final no volume padrão. Seção sem faixa nomeada
+    # cai na trilha global naquele nível. Kill-switch ROTEIRO_MUSICA_TIMELINE=0 (volta à trilha única).
+    feito = False
+    if _musica_timeline_on():
+        try:
+            plano = _plano_musica_timeline(ff, base_mat, mat_dirs, segmentos, musica)
+        except Exception as e:
+            log("    ⚠ timeline de música falhou (%s) — caindo na trilha única." % e)
+            plano = []
+        if plano and _mix_audio_final(ff, video_src, plano, limpeza, ln, final, log):
+            feito = True
+            log("    música por seção mixada (%s)%s." % (
+                _descrever_plano(plano),
+                " + narração tratada (loudnorm no bus final)" if (limpeza or ln) else ""))
+        elif plano:
+            log("    ⚠ música por seção falhou no mix — tentando a trilha única.")
+
+    if feito:
+        pass
+    elif musica:
         db = os.environ.get("ROTEIRO_MUSICA_DB", "-10")
         # Limpeza SÓ na narração; música entra por baixo (-10 dB); e o loudnorm é o ÚLTIMO elo,
         # aplicado ao BUS JÁ MIXADO (narração+música), pra "volume bom" (I=-14/TP=-1.5) valer no
@@ -2002,10 +2299,155 @@ def construir(proj, log, cancel=None, parte=None):
 
 
 def _musica(base_mat, modelos):
-    """Faixa de música de fundo: 1ª faixa em materiais/<canal>/padronizados/ (áudio) ou o
-    modelo (nenhuma chave dedicada — reusa 'padronizados'). None se não houver."""
+    """Faixa de música de fundo GLOBAL (bed/fallback): 1ª faixa em materiais/<canal>/padronizados/
+    (áudio). None se não houver. As faixas POR SEÇÃO (musicas/) têm precedência no seu trecho."""
     from common import AUDIO_EXTS
     faixas = _listar(base_mat / "padronizados", AUDIO_EXTS)
     if faixas:
         return faixas[0]
     return None
+
+
+# ---------------------------------------------------------------------------
+# Música por SEÇÃO (timeline) — faixas nomeadas por momento (2026-07-10)
+# ---------------------------------------------------------------------------
+# A editora passou faixas de música NOMEADAS pelo momento em que entram (materiais/<canal>/musicas/).
+# Cada faixa toca no SEU trecho no lugar da trilha global: 'música do teaser' e 'música do book 2'
+# entram como leito BAIXO (-40 dB) sob a fala; a 'música final' toca no minuto final no volume PADRÃO
+# (-10 dB). Seção sem faixa nomeada cai na trilha global (padronizados) no nível daquela seção.
+# Kill-switch ROTEIRO_MUSICA_TIMELINE=0 (volta à trilha única de antes). Níveis por env (ver _musica_db).
+
+def _musica_timeline_on():
+    return os.environ.get("ROTEIRO_MUSICA_TIMELINE", "1").strip().lower() not in (
+        "0", "off", "none", "nao", "não", "no", "false")
+
+
+def _norm_stem(s):
+    import unicodedata
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
+
+
+def _secao_da_musica(stem):
+    """Classifica um arquivo de musicas/ na seção pelo NOME (tolerante a acento/espaço: 'música do
+    book 2', 'musica_final', 'música do teaser'…). None se não reconhecer."""
+    n = _norm_stem(stem)
+    if "teaser" in n:
+        return "teaser"
+    if "book" in n or "rabo" in n:
+        return "book2"
+    if "final" in n or "minuto" in n:
+        return "final"
+    if "corpo" in n or "capitulo" in n or "geral" in n or "global" in n or n in ("musica", "music"):
+        return "corpo"
+    return None
+
+
+def _musicas_por_secao(dirs):
+    """{secao: Path} das faixas em <dir>/musicas/ (varre `dirs` na ordem; próprio vence). Ignora
+    pastas inexistentes e nomes não reconhecidos."""
+    from common import AUDIO_EXTS
+    out = {}
+    for d in dirs:
+        for f in _listar(d / "musicas", AUDIO_EXTS):
+            sec = _secao_da_musica(f.stem)
+            if sec and sec not in out:
+                out[sec] = f
+    return out
+
+
+def _secao_do_seg(nome):
+    """Seção de um segmento pelo NOME do arquivo. blackgap -> None (herda a seção anterior)."""
+    n = nome.lower()
+    if "blackgap" in n:
+        return None
+    if "ultimo" in n or "_fim_" in n or "zz_fim" in n:
+        return "final"
+    if "abertura" in n or "teaser" in n or "intro_pos_teaser" in n:
+        return "teaser"
+    if ("intro_book_02" in n or "resumo" in n or "cta" in n or "aviso_clone" in n
+            or "tutorial_plataforma" in n):
+        return "book2"
+    return "corpo"   # capa/corpo (e qualquer outro) = o miolo da história
+
+
+def _janelas_secoes(ff, segmentos):
+    """[(secao, ini, fim)] em s na timeline concatenada — segmentos consecutivos da MESMA seção
+    são fundidos numa janela. O respiro preto herda a seção anterior (música contínua no dip)."""
+    janelas, off, ultima = [], 0.0, "corpo"
+    for s in segmentos:
+        d = _dur(ff, s)
+        sec = _secao_do_seg(s.name) or ultima
+        if janelas and janelas[-1][0] == sec:
+            janelas[-1][2] = off + d
+        else:
+            janelas.append([sec, off, off + d])
+        ultima = sec
+        off += d
+    return [(s, a, b) for (s, a, b) in janelas]
+
+
+def _musica_db(sec):
+    """dB da música na seção (env-tunável). teaser/book2 = -40 (leito sob a fala, decisão da
+    editora 2026-07-10); final/corpo = ROTEIRO_MUSICA_DB (-10, 'volume padrão')."""
+    padrao = os.environ.get("ROTEIRO_MUSICA_DB", "-10")
+    tab = {"teaser": ("ROTEIRO_MUSICA_TEASER_DB", "-40"),
+           "book2":  ("ROTEIRO_MUSICA_BOOK2_DB", "-40"),
+           "final":  ("ROTEIRO_MUSICA_FINAL_DB", padrao),
+           "corpo":  ("ROTEIRO_MUSICA_DB", padrao)}
+    env, dfl = tab.get(sec, ("ROTEIRO_MUSICA_DB", padrao))
+    return os.environ.get(env, dfl)
+
+
+def _plano_musica_timeline(ff, base_mat, mat_dirs, segmentos, global_track):
+    """Plano de mixagem por seção: [(secao, track, db, ini, fim)]. Cada janela usa a faixa nomeada
+    da sua seção (materiais/<canal>/musicas/ + herdada + global assets/musicas/) ou, na falta, a
+    trilha global (padronizados). Janela sem faixa alguma é pulada (sem música ali). [] se não há
+    nenhuma faixa (nem por-seção nem global) — o chamador cai no caminho sem música."""
+    _assets = Path(__file__).resolve().parent.parent / "assets" / "musicas"
+    porsec = _musicas_por_secao(list(mat_dirs) + [_assets])
+    if not porsec and not global_track:
+        return []
+    plano = []
+    for sec, a, b in _janelas_secoes(ff, segmentos):
+        trk = porsec.get(sec) or global_track
+        if not trk or (b - a) <= 0.05:
+            continue
+        plano.append((sec, trk, _musica_db(sec), a, b))
+    return plano
+
+
+def _mix_audio_final(ff, video_src, plano, limpeza, ln, final, log):
+    """Mixa a NARRAÇÃO (áudio do video_src, limpo) + as janelas de música do `plano` (cada faixa
+    loopada, aparada à janela, atrasada pro início dela, no seu nível) e aplica o loudnorm no bus
+    final. amix normalize=0 (não rebaixa a voz); loudnorm por último segura o pico. True em sucesso."""
+    inputs = ["-i", str(video_src)]
+    narr = ("[0:a]%s[n]" % limpeza) if limpeza else "[0:a]anull[n]"
+    parts, labels = [narr], ["[n]"]
+    for k, (_sec, trk, db, a, b) in enumerate(plano):
+        inputs += ["-stream_loop", "-1", "-i", str(trk)]
+        durw = max(0.05, b - a)
+        delay = int(round(a * 1000))
+        parts.append("[%d:a]volume=%sdB,atrim=0:%.3f,asetpts=PTS-STARTPTS,adelay=%d|%d[m%d]"
+                     % (k + 1, db, durw, delay, delay, k))
+        labels.append("[m%d]" % k)
+    norm = ":normalize=0" if ln else ""
+    amix_out = "mx" if ln else "a"
+    fc = ";".join(parts) + ";" + "".join(labels) + \
+        "amix=inputs=%d:duration=first:dropout_transition=0%s[%s]" % (len(labels), norm, amix_out)
+    if ln:
+        fc += ";[mx]%s[a]" % ln
+    _run([ff, "-y", "-hide_banner", "-loglevel", "error", *inputs,
+          "-filter_complex", fc, "-map", "0:v", "-map", "[a]", "-c:v", "copy", *_AENC, str(final)],
+         log, "musica-timeline")
+    return final.exists() and final.stat().st_size > 0
+
+
+def _descrever_plano(plano):
+    """Resumo legível do plano de música por seção p/ o log (secao=arquivo@dB(dur))."""
+    from collections import OrderedDict
+    vis = OrderedDict()
+    for (sec, trk, db, a, b) in plano:
+        nm, _db, dur = vis.get(sec, (Path(trk).name, db, 0.0))
+        vis[sec] = (nm, db, dur + (b - a))
+    return "; ".join("%s=%s@%sdB(%.0fs)" % (sec, nm, db, dur) for sec, (nm, db, dur) in vis.items())

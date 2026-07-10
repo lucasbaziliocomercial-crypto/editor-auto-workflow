@@ -22,5 +22,12 @@ pra FIXAR/DEIXAR EXPLICITO por maquina (mais deterministico e mais rapido no boo
 smoke-test). Se o encoder explicito falhar numa maquina, a montagem NAO cai sozinha no auto —
 ai troca por ROTEIRO_ENCODER=auto nesse notebook (ou libx264 pra forcar CPU).
 
-Os ajustes de QUALIDADE do Ken Burns (ROTEIRO_KB_SUPERSAMPLE=2.0 anti-tremido, motion blur,
-zoom/pan) sao iguais em todas as maquinas e vem dos defaults do config.py — nao repita aqui.
+Os ajustes de QUALIDADE do Ken Burns (motion blur, zoom/pan) vem dos defaults do config.py e
+sao iguais em todas as maquinas — nao repita aqui.
+
+EXCECAO (tuning de TEMPO por maquina): o notebook Intel (8GB) carrega no proprio bloco um
+override ROTEIRO_KB_SUPERSAMPLE=1.5 (em vez do default 2.0) + ROTEIRO_CORPO_PARALELO, porque em
+8GB o supersample 2.0 e pesado demais. O config.py sanciona 1.5 em notebook 8GB (o tmix segura o
+liso; NAO ir p/ 1.0). Detalhe no proprio notebook-intel-i5-13420h.env. O AMD (tambem 8GB) pode
+receber o mesmo tratamento se ficar lento — hoje segue no default 2.0. A alavanca de maior
+impacto (corta Magnific E montagem) e ROTEIRO_IMAGES_PER_CHAPTER (8 default; confira que nao esta 15).

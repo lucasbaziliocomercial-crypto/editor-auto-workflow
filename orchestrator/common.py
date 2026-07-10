@@ -99,12 +99,18 @@ def voz_do_canal(canal, genero="f"):
     return nome, vid
 
 
-# Formato do vídeo POR CANAL (chave = slug do nome da List). Canais que fogem do
-# vertical padrão (9:16) declaram aqui (W, H, ASPECT). O pipeline aplica isto nas envs
-# ROTEIRO_W/H/ASPECT antes das etapas visuais (4/5/6/7). Canal sem override cai nos
-# defaults globais (config.py → vertical 1080x1920).
+# Formato do vídeo POR CANAL (chave = slug do nome da List). O DEFAULT global já é HORIZONTAL
+# (config.py → 1920x1080 16:9); este mapa é para OVERRIDES por canal. Hoje serve p/ dois fins:
+#   (1) declarar um canal VERTICAL (9:16) — vertical virou opt-in; e
+#   (2) âncora DEFENSIVA das irmãs horizontais (lena/rowan/kay): mesmo valor do default, mas
+#       explícito pra elas seguirem horizontais mesmo se o default global for revertido.
+# O pipeline aplica isto nas envs ROTEIRO_W/H/ASPECT antes das etapas visuais (4/5/6/7).
+# Bug pego 2026-07-10 (card 84 Rowan saiu vertical): a raiz era o default global 9:16, não só
+# a ausência no mapa — por isso o default virou horizontal. Ver decisoes-changelog.
 CANAL_FORMATO = {
     "lena": (1920, 1080, "16:9"),   # Lena Principal = vídeo isca / YouTube (horizontal)
+    "rowan": (1920, 1080, "16:9"),  # irmã da Lena (materiais herdados horizontais)
+    "kay": (1920, 1080, "16:9"),    # irmã da Lena (materiais herdados horizontais)
 }
 
 
@@ -115,11 +121,11 @@ def formato_do_canal(canal):
     if slug in CANAL_FORMATO:
         return CANAL_FORMATO[slug]
     try:
-        w = int(float(os.environ.get("ROTEIRO_W", "1080")))
-        h = int(float(os.environ.get("ROTEIRO_H", "1920")))
+        w = int(float(os.environ.get("ROTEIRO_W", "1920")))
+        h = int(float(os.environ.get("ROTEIRO_H", "1080")))
     except ValueError:
-        w, h = 1080, 1920
-    return (w, h, os.environ.get("ROTEIRO_ASPECT", "9:16").strip() or "9:16")
+        w, h = 1920, 1080
+    return (w, h, os.environ.get("ROTEIRO_ASPECT", "16:9").strip() or "16:9")
 
 
 def materiais_canal(canal):
@@ -129,7 +135,7 @@ def materiais_canal(canal):
     padrão se não existir (vazia — só a estrutura, pro editor saber onde largar cada coisa)."""
     base = MATERIAIS_DIR / slugify(canal or "sem-canal", maxlen=40)
     for sub in ("teaser", "take_p2", "book2", "cta", "padronizados", "template_capa", "qr",
-                "detalhes", "sfx"):
+                "detalhes", "sfx", "musicas"):
         (base / sub).mkdir(parents=True, exist_ok=True)
     return base
 
@@ -478,6 +484,8 @@ class Projeto:
     def prompts_imagens(self):  return self.dir / "prompts_imagens.txt"    # Etapa 7
     @property
     def images_dir(self):       return self.dir / "images"                 # Etapa 5 (corpo)
+    @property
+    def img_qa(self):           return self.images_dir / "img_qa.json"     # Etapa 5 (veredito do QA visual das imagens)
     @property
     def character_bible(self):  return self.dir / "character_bible.txt"    # Etapa 2 (personagens)
     @property

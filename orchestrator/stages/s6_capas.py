@@ -42,8 +42,8 @@ def _cfg():
             return int(float(os.environ.get(k, d)))
         except ValueError:
             return int(d)
-    w = _i("ROTEIRO_W", 1080)
-    h = _i("ROTEIRO_H", 1920)
+    w = _i("ROTEIRO_W", 1920)
+    h = _i("ROTEIRO_H", 1080)
     # Tamanho-base do título. É um TETO: títulos longos encolhem sozinhos (auto-fit do covers).
     # No formato HORIZONTAL o título fica proporcionalmente maior (~5,2% da largura ≈ 100px em
     # 1920, batendo com a referência da Lena); no vertical mantém o padrão.

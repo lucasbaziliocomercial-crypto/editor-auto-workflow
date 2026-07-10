@@ -1,24 +1,25 @@
 # -*- coding: utf-8 -*-
-"""abertura.py — ABERTURA animada da Parte 2 (book 2), 2026-07-10.
+"""abertura.py — CENA DE ABERTURA (antes do teaser), P1 e P2. 2026-07-10.
 
-A editora abre TODO book 2 com uma cena animada antes do capítulo 1. A esteira gerava a P2
-começando direto no capítulo. Aqui a esteira TRANSFORMA o thumbnail do card (`thumb_ref.png`,
-baixado na Etapa 1 e semeado na pasta da P2 pelo pipeline) num CLIPE animado (image->video via
-Magnific) — a "cena animada" de abertura. A montagem (montagem_vertical) encaixa esse clipe como
-1º segmento da P2 e cruza (crossfade) pro capítulo 1.
+TODO vídeo abre com uma CENA ANIMADA antes do teaser (na isca P1) / como 1º segmento (na P2). A
+fonte PADRÃO dessa cena é um take do PRÓPRIO teaser que TENHA ÁUDIO — o diálogo já gravado no clipe
+do VEO — tocado COM esse som (a montagem detecta o áudio via ffprobe e passa o candidato aqui). É a
+cara falada do vídeo abrindo antes do gancho mudo do teaser. Vale pra TODAS as categorias.
 
-CONTRATO: `garantir_clip(proj, log, cancel)` devolve o Path do clipe de abertura (vídeo), ou None
-quando não há como produzir (sem thumbnail, trava de crédito desligada, geração falhou, kill-switch
-off). A montagem trata None graciosamente (P2 sem abertura, como antes).
+CONTRATO: `garantir_clip(proj, log, cancel, teaser_com_audio=None, permitir_ia=False)` devolve o
+Path do clipe de abertura (vídeo), ou None quando não há fonte. A montagem trata None graciosamente
+(vídeo abre direto no teaser / na capa, como antes).
 
-FONTES na ordem de prioridade (o 1º que existir vence):
-  1. Clipe LARGADO pela editora em `projects/<slug>/abertura/` (qualquer .mp4/.mov/…) — igual ao
-     teaser: se ela quer animar à mão no Flow/VEO, é só largar ali. Sem custo de IA.
-  2. Clipe JÁ GERADO `projects/<slug>/abertura/abertura.mp4` (idempotência — não regera).
-  3. GERAÇÃO por IA (image->video do thumbnail), atrás da trava de crédito ROTEIRO_ABERTURA_VIDEO_OK=1.
+FONTES na ordem de prioridade (a 1ª que existir vence):
+  1. Clipe LARGADO pela editora em `projects/<slug>/abertura/` (qualquer .mp4/.mov/…, menos o
+     abertura.mp4 gerado) — override manual: se ela quer escolher a cena à mão, é só largar ali.
+  2. Take do TEASER com ÁUDIO (`teaser_com_audio`, resolvido pela montagem) — a FONTE PADRÃO.
+  3. Clipe JÁ GERADO `projects/<slug>/abertura/abertura.mp4` (idempotência do caminho de IA antigo).
+  4. GERAÇÃO por IA (image->video do thumbnail) — só quando `permitir_ia` (hoje: P2) E a trava de
+     crédito ROTEIRO_ABERTURA_VIDEO_OK=1. Fallback legado pra quando não há take de teaser com áudio.
 
-Custo: video_generate COBRA crédito (nenhum modelo é ilimitado via MCP). Por isso a geração é
-opt-in explícito (mesma filosofia do corpo, magnific_seam.garantir_corpo_liberado).
+Custo: video_generate COBRA crédito (nenhum modelo é ilimitado via MCP). Por isso a geração por IA
+é opt-in explícito; o caminho padrão (take do teaser) não custa nada.
 """
 
 import os
@@ -28,7 +29,7 @@ VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi")
 
 
 def _on():
-    """Abertura LIGADA por padrão (só a P2 chama). Desliga com ROTEIRO_ABERTURA=0/off."""
+    """Abertura LIGADA por padrão (P1 e P2 chamam). Desliga com ROTEIRO_ABERTURA=0/off."""
     return os.environ.get("ROTEIRO_ABERTURA", "1").strip().lower() not in (
         "0", "off", "none", "nao", "não", "no", "false")
 
@@ -40,7 +41,7 @@ def _credito_ok():
 
 
 def _aspect():
-    return os.environ.get("ROTEIRO_ASPECT", "9:16").strip() or "9:16"
+    return os.environ.get("ROTEIRO_ASPECT", "16:9").strip() or "16:9"
 
 
 def _duracao():
@@ -69,18 +70,29 @@ def _dir(proj):
     return proj.dir / "abertura"
 
 
-def _clip_existente(proj):
-    """1º vídeo em projects/<slug>/abertura/ (drop da editora ou o abertura.mp4 já gerado). O
-    abertura.mp4 gerado tem prioridade explícita; senão o 1º alfabético."""
+def _drop_editora(proj):
+    """Clipe que a EDITORA largou em projects/<slug>/abertura/ (override manual): qualquer vídeo
+    que NÃO seja o abertura.mp4 gerado por IA. 1º alfabético. None se não houver."""
     d = _dir(proj)
     if not d.is_dir():
         return None
-    ger = d / "abertura.mp4"
-    if ger.is_file() and ger.stat().st_size > 0:
-        return ger
     vids = sorted(p for p in d.iterdir()
-                  if p.is_file() and p.suffix.lower() in VIDEO_EXTS and p.stat().st_size > 0)
+                  if p.is_file() and p.suffix.lower() in VIDEO_EXTS
+                  and p.name.lower() != "abertura.mp4" and p.stat().st_size > 0)
     return vids[0] if vids else None
+
+
+def selecionar_teaser_com_audio(clips, tem_audio):
+    """1º clipe do teaser que TEM faixa de áudio (o diálogo já gravado no take do VEO) — a fonte
+    PADRÃO da cena de abertura. `tem_audio(path)->bool` é injetado pela montagem (usa ffprobe).
+    None se nenhum clipe tiver áudio."""
+    for c in clips or []:
+        try:
+            if tem_audio(c):
+                return Path(c)
+        except Exception:
+            continue
+    return None
 
 
 def _instrucao(aspect, dur, prompt, modelo):
@@ -117,23 +129,40 @@ def _instrucao(aspect, dur, prompt, modelo):
     )
 
 
-def garantir_clip(proj, log, cancel=None):
-    """Devolve o Path do clipe de abertura (vídeo) ou None. Gera por IA só se preciso e liberado."""
+def garantir_clip(proj, log, cancel=None, teaser_com_audio=None, permitir_ia=False):
+    """Devolve o Path do clipe da CENA DE ABERTURA (vídeo) ou None. Ordem de prioridade:
+    drop da editora > take do teaser com áudio > abertura.mp4 gerada > geração por IA (só se
+    `permitir_ia` + trava de crédito). Ver o docstring do módulo."""
     if not _on():
-        log("    abertura: desligada (ROTEIRO_ABERTURA=0) — P2 sem abertura.")
+        log("    abertura: desligada (ROTEIRO_ABERTURA=0) — sem cena de abertura.")
         return None
-    existente = _clip_existente(proj)
-    if existente is not None:
-        log("    abertura: usando clipe existente (%s)." % existente.name)
-        return existente
-    # Precisa gerar. Requisitos: thumbnail + trava de crédito.
+    # 1) drop manual da editora (override)
+    drop = _drop_editora(proj)
+    if drop is not None:
+        log("    abertura: usando clipe largado pela editora (%s)." % drop.name)
+        return drop
+    # 2) take do TEASER com ÁUDIO — a fonte PADRÃO (o diálogo do próprio vídeo)
+    if teaser_com_audio is not None:
+        ta = Path(teaser_com_audio)
+        if ta.is_file() and ta.stat().st_size > 0:
+            log("    abertura: cena animada = take do teaser com diálogo (%s)." % ta.name)
+            return ta
+    # 3) abertura.mp4 já gerada por IA (idempotência do caminho antigo)
+    ger = _dir(proj) / "abertura.mp4"
+    if ger.is_file() and ger.stat().st_size > 0:
+        log("    abertura: usando clipe gerado (%s)." % ger.name)
+        return ger
+    # 4) geração por IA do thumbnail — fallback legado, só quando permitido (P2) e liberado
+    if not permitir_ia:
+        log("    abertura: sem take de teaser com áudio nem clipe largado — sem cena de abertura.")
+        return None
     if not proj.existe(proj.thumb_ref):
-        log("    abertura: sem thumb_ref.png na pasta da P2 — pulando a abertura.")
+        log("    abertura: sem thumb_ref.png na pasta — sem cena de abertura.")
         return None
     if not _credito_ok():
         log("    abertura: geração por IA TRAVADA (video_generate cobra crédito). Para ligar, "
-            "exporte ROTEIRO_ABERTURA_VIDEO_OK=1 — ou largue um clipe pronto em "
-            "projects/<slug>/abertura/. P2 sem abertura por enquanto.")
+            "exporte ROTEIRO_ABERTURA_VIDEO_OK=1 — ou largue um clipe em projects/<slug>/abertura/, "
+            "ou garanta um take de teaser com áudio. Sem cena de abertura por enquanto.")
         return None
     _dir(proj).mkdir(parents=True, exist_ok=True)
     aspect, dur, prompt, modelo = _aspect(), _duracao(), _prompt_movimento(), _modelo()
@@ -145,11 +174,11 @@ def garantir_clip(proj, log, cancel=None):
         rodar_claude(_instrucao(aspect, dur, prompt, modelo), proj.dir, log, cancel,
                      modelo="sonnet", allowed_tools=magnific_seam.allowed_tools_video())
     except Exception as e:
-        log("    ⚠ abertura: geração falhou (%s) — P2 sem abertura." % e)
+        log("    ⚠ abertura: geração falhou (%s) — sem cena de abertura." % e)
         return None
     clip = _dir(proj) / "abertura.mp4"
     if clip.exists() and clip.stat().st_size > 0:
         log("    abertura: clipe animado gerado (%s)." % clip.name)
         return clip
-    log("    ⚠ abertura: geração não produziu abertura/abertura.mp4 — P2 sem abertura.")
+    log("    ⚠ abertura: geração não produziu abertura/abertura.mp4 — sem cena de abertura.")
     return None

@@ -1,0 +1,41 @@
+{
+  "hook_chars": 0,
+  "capitulos": [
+    {
+      "n": 1,
+      "titulo": "An Ordinary Tuesday",
+      "primeira_frase": "The house near the Savannah River woke up slowly, the way old houses do, carrying the",
+      "titulo_dur": 1.997
+    },
+    {
+      "n": 2,
+      "titulo": "Tenderness Isn't Truth",
+      "primeira_frase": "The sun came into the bedroom in the morning as if nothing had happened, and Jago",
+      "titulo_dur": 2.229
+    },
+    {
+      "n": 3,
+      "titulo": "The Name No One Said",
+      "primeira_frase": "The cream envelope sat on the table between them as if it weighed more than the",
+      "titulo_dur": 2.136
+    },
+    {
+      "n": 4,
+      "titulo": "The Town With No Name",
+      "primeira_frase": "Silas gave in on Tuesday morning, and he gave in because Rowena stopped asking.",
+      "titulo_dur": 2.229
+    },
+    {
+      "n": 5,
+      "titulo": "Ten Years in a Single Room",
+      "primeira_frase": "Jago didn't sleep. The house near the Savannah River was so silent that he could hear",
+      "titulo_dur": 2.368
+    },
+    {
+      "n": 6,
+      "titulo": "The Chair With an Owner",
+      "primeira_frase": "Sunday morning arrived at the house near the Savannah River with a low, wary light that",
+      "titulo_dur": 1.95
+    }
+  ]
+}
