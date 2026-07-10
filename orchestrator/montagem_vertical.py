@@ -405,6 +405,26 @@ def _sync_guard_on():
     return v not in ("0", "off", "nao", "não", "no", "false")
 
 
+def _seg_fresco(seg, *fontes):
+    """True se `seg` existe, não está vazio E é MAIS NOVO que todas as `fontes` (arquivos de
+    áudio de que ele foi fatiado/muxado). Fecha o furo do card 256: a montagem é idempotente por
+    segmento (reusa out/seg_*.mp4 pelo tamanho), então quando o narration.mp3 é regerado em INGLÊS
+    mas os seg_*_corpo/teaser/capa foram assados do áudio PT antigo, a remontagem reusava o PT.
+    Comparar mtime força o rebuild do segmento cuja fonte de áudio ficou mais nova. Fontes
+    inexistentes são ignoradas (ex.: capa sem titulo narrado). ROTEIRO_SEG_STALE_TOL = folga (s)."""
+    try:
+        if not (seg.exists() and seg.stat().st_size > 0):
+            return False
+        tol = float(os.environ.get("ROTEIRO_SEG_STALE_TOL", "2"))
+        smt = seg.stat().st_mtime
+        for f in fontes:
+            if f is not None and f.exists() and smt + tol < f.stat().st_mtime:
+                return False
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _boundaries(proj, ff, log):
     """Devolve (total, [b1, b2, ...]) — os tempos (s) em que cada CAPÍTULO começa na narração.
 
@@ -424,55 +444,43 @@ def _boundaries(proj, ff, log):
 
     cues = parse_srt(proj.narration_srt) if proj.existe(proj.narration_srt) else []
     # Casa a primeira_frase de cada capítulo contra a narração p/ achar onde ele COMEÇA — é ali que
-    # a capa entra. Concatena as cues normalizadas num "blob" com índice char->tempo e busca a
-    # frase-âncora por JANELA DESLIZANTE. Robusto a: (a) espaço duplo do Whisper (tratado no _norm),
-    # (b) a frase ATRAVESSAR duas cues (a busca cue-a-cue antiga falhava), e (c) o Whisper errar a
-    # 1ª palavra — nome próprio "Caracciolo"->"Caracolo", "Vecchia"->"Vichia" — por isso tentamos
-    # janelas a partir de vários offsets, não só do prefixo. Monotônico: cada cap depois do anterior.
-    blob_parts, span, _pos = [], [], 0
-    for (_i, ini, _fim, txt) in cues:
-        nt = _norm(txt)
-        if not nt:
-            continue
-        span.append((_pos, ini))
-        blob_parts.append(nt)
-        _pos += len(nt) + 1
-    blob = " ".join(blob_parts)
-
-    def _tempo_da_pos(p):
-        t = span[0][1] if span else 0.0
-        for off, ini in span:
-            if off <= p:
-                t = ini
-            else:
-                break
-        return t
+    # a capa entra. Usa a MESMA timeline palavra->tempo do teaser (`_word_timeline`, precisão
+    # sub-cue) + casamento tolerante a erro do Whisper (`_palavra_igual`: prefixo + Levenshtein<=1),
+    # NÃO mais `blob.find` exato. Robusto a: (a) espaço duplo do Whisper, (b) a frase ATRAVESSAR
+    # duas cues, e (c) o Whisper errar palavras no meio ("Caracciolo"->"Caracolo", "fiancé"->
+    # "fiance", "Vecchia"->"Vichia") — casa com >=~60% das 7 primeiras palavras batendo, onde o
+    # `blob.find` (que exige um trecho contíguo PERFEITO de 4-6 palavras) perdia a âncora e o
+    # capítulo caía no fallback proporcional. Monotônico: cada cap casa só DEPOIS do anterior
+    # (`_desde` avança) -> a fronteira nunca "volta no tempo".
+    tl = _word_timeline(cues, total + 5.0) if cues else []
 
     def _casar(frase, desde):
-        pal = _norm(frase).split()
-        if not pal or not blob:
+        """(índice_na_timeline, tempo) do início da frase-âncora buscando a partir de `desde`, ou
+        None. Desliza a chave das 7 primeiras palavras sobre a timeline e casa se >=~60% baterem
+        (tolerante a erro do Whisper via `_palavra_igual`)."""
+        chave = re.sub(r"[^a-z0-9]+", " ", (frase or "").lower()).split()[:7]
+        if not chave or not tl:
             return None
-        for win in (6, 5, 4):
-            melhor = None
-            for off in range(0, min(len(pal), 6)):
-                if off + win > len(pal):
-                    continue
-                chave = " ".join(pal[off:off + win])
-                if len(chave) < 8:
-                    continue
-                p = blob.find(chave, desde)
-                if p >= 0 and (melhor is None or p < melhor):
-                    melhor = p
-            if melhor is not None:
-                return melhor
+        alvo = max(3, (len(chave) * 3 + 2) // 5)  # ~60% das palavras
+        melhor_j, melhor_sc = None, 0
+        for j in range(desde, len(tl)):
+            sc = sum(1 for p in range(len(chave))
+                     if j + p < len(tl) and _palavra_igual(chave[p], tl[j + p][0]))
+            if sc > melhor_sc:
+                melhor_sc, melhor_j = sc, j
+                if sc == len(chave):
+                    break
+        if melhor_j is not None and melhor_sc >= alvo:
+            return melhor_j, tl[melhor_j][1]
         return None
 
     starts, _desde = {}, 0
     for c in caps:
-        p = _casar(c.get("primeira_frase", ""), _desde)
-        if p is not None:
-            starts[c["n"]] = _tempo_da_pos(p)
-            _desde = p + 1
+        r = _casar(c.get("primeira_frase", ""), _desde)
+        if r is not None:
+            j, t = r
+            starts[c["n"]] = t
+            _desde = j + 1
 
     # GUARD anti-dessincronia: se NENHUM capítulo (de 2+) casou com a narração, quase sempre o
     # narration.mp3 é de OUTRO draft do roteiro — a Etapa 3 é idempotente e reusou o áudio velho
@@ -1241,7 +1249,7 @@ def construir(proj, log, cancel=None, parte=None):
         # Os clipes já vêm SEM a marca 'Veo' (limpos por _teaser_clips → _teaser_limpo).
         teaser_clips = _teaser_clips()
         seg = _seg_path("00_teaser")
-        if not (seg.exists() and seg.stat().st_size > 0):
+        if not _seg_fresco(seg, proj.narration_mp3):
             vmudo = tmp / "_v_teaser.mp4"
             if teaser_clips:
                 clips_seq, durs, motivo = _teaser_plano(proj, ff, teaser_clips, hook_dur, log)
@@ -1273,7 +1281,8 @@ def construir(proj, log, cancel=None, parte=None):
 
         def _seg_capa():
             s = _seg_path("%02d_capa" % n)
-            if s.exists() and s.stat().st_size > 0:
+            titulo_mp3 = proj.covers_dir / ("titulo_%02d.mp3" % n)
+            if _seg_fresco(s, titulo_mp3):
                 return s
             if not (capa.exists() and capa.stat().st_size > 0):
                 return None
@@ -1284,7 +1293,6 @@ def construir(proj, log, cancel=None, parte=None):
             # A capa toca a narração do título ("Chapter N — Título", Etapa 3) por baixo — a
             # duração do vídeo já foi cortada p/ essa fala + respiro (Etapa 6), então casa. Sem
             # o áudio do título (desligado / TTS falhou), a capa é a "pausa" em silêncio (legado).
-            titulo_mp3 = proj.covers_dir / ("titulo_%02d.mp3" % n)
             if _cover_narrar_on() and titulo_mp3.exists() and titulo_mp3.stat().st_size > 0:
                 _audio_titulo(ff, titulo_mp3, dur, aud, log)
             else:
@@ -1295,7 +1303,7 @@ def construir(proj, log, cancel=None, parte=None):
 
         def _seg_corpo():
             s = _seg_path("%02d_corpo" % n)
-            if s.exists() and s.stat().st_size > 0:
+            if _seg_fresco(s, proj.narration_mp3):
                 return s
             dur = (fim - ini) if fim is not None else (total - ini)
             dur = max(1.0, dur)
