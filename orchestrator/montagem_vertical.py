@@ -298,6 +298,19 @@ def _venc_args(fps):
     return ["-c:v", enc, "-pix_fmt", pix, "-r", str(fps)] + _venc_extra(enc)
 
 
+def _hwaccel_decode():
+    """Args de DECODE acelerado por GPU p/ os passes que re-encodam um vídeo GRANDE já montado
+    (queima de legenda/QR no vídeo inteiro). Decodar o H264 na GPU tira a CPU do caminho — o filtro
+    (libass) segue em CPU, o FFmpeg baixa os frames automaticamente. Medido nesta máquina: ~32% mais
+    rápido no passe de legenda, saída idêntica. Só liga com NVIDIA (nvenc ativo ⇒ cuda disponível);
+    nas outras (qsv/amf/cpu) devolve [] (sem mudança). ROTEIRO_HWACCEL_DECODE=0 desliga.
+    O chamador tem fallback: se o passe com GPU não gerar o arquivo, refaz em CPU."""
+    if os.environ.get("ROTEIRO_HWACCEL_DECODE", "1").strip().lower() in (
+            "0", "off", "no", "false", "nao", "não"):
+        return []
+    return ["-hwaccel", "cuda"] if "nvenc" in _encoder() else []
+
+
 _AENC = ["-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2"]
 
 
@@ -879,6 +892,51 @@ def _corpo_paralelo():
     return max(1, min(4, v))
 
 
+def _kb_prescale_on():
+    """Pré-escala cada imagem do Ken Burns p/ o canvas super-amostrado UMA vez (PNG), em vez de rodar
+    o `scale ...:lanczos` A CADA FRAME dentro do zoompan. A imagem é ESTÁTICA (`-loop 1`), então o
+    buffer escalado é o mesmo em todo frame — o lanczos por-frame é puro desperdício. Medido em
+    PRODUÇÃO (imgs ~2688×1536 → canvas ss1.5 = 2880×1620, nvenc p4): corpo ~1.3x mais rápido — o
+    ganho é MODESTO quando a fonte é quase do tamanho do canvas (o custo real vira o zoompan+tmix,
+    que É o efeito Ken Burns e é inevitável); sobe MUITO só quando a imagem-fonte é bem MAIOR que o
+    canvas (aí o lanczos por-frame domina). Ganho de graça e seguro (fallback embaixo). A saída NÃO é
+    bit-idêntica ao scale por-frame (o PNG intermediário é 8-bit → arredondamento sub-pixel), mas a
+    diferença é imperceptível: PSNR ~50 dB medido (acima de ~45 dB o olho não distingue).
+    ROTEIRO_KB_PRESCALE=0 desliga (volta ao scale por-frame, byte-a-byte como antes)."""
+    return os.environ.get("ROTEIRO_KB_PRESCALE", "1").strip().lower() not in (
+        "0", "off", "no", "false", "nao", "não")
+
+
+def _prescale_img(ff, img, sw, sh, cache_dir, log):
+    """Escala `img` p/ sw×sh (o MESMO `scale ...:lanczos,crop` que a chain do zoompan faria) UMA vez,
+    num PNG (diferença sub-pixel imperceptível vs o scale por-frame — PSNR ~50 dB). Devolve o Path do
+    PNG pré-escalado, ou None em falha (o chamador
+    mantém o scale/crop na chain — fallback seguro). Cache por (nome, sw, sh) → reusa entre re-runs e
+    entre os capítulos em paralelo. Escreve em arquivo temporário e renomeia (os.replace atômico),
+    p/ outra thread nunca ler um PNG meio-escrito."""
+    if not _kb_prescale_on():
+        return None
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        import hashlib
+        chave = hashlib.md5(
+            ("%s|%d|%d" % (os.path.abspath(str(img)), sw, sh)).encode("utf-8")).hexdigest()[:16]
+        dest = cache_dir / ("%s.png" % chave)
+        if dest.exists() and dest.stat().st_size > 0:
+            return dest
+        tmp_dest = cache_dir / ("%s.tmp%d.png" % (chave, os.getpid()))
+        _run([ff, "-y", "-hide_banner", "-loglevel", "error", "-i", str(img),
+              "-vf", "scale=%d:%d:force_original_aspect_ratio=increase:flags=lanczos,crop=%d:%d"
+              % (sw, sh, sw, sh), "-frames:v", "1", str(tmp_dest)], log, "kb-prescale")
+        if tmp_dest.exists() and tmp_dest.stat().st_size > 0:
+            os.replace(str(tmp_dest), str(dest))
+            return dest
+        tmp_dest.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return None
+
+
 def _fade_edges_suffix(fc, mapa, dur, fade_edges):
     """Anexa fade-in←preto (início) e fade-out→preto (fim) ao stream final `mapa` de um filter_complex
     `fc`, p/ suavizar o dip pro preto da troca (ver _blackgap_fade). Devolve (fc, mapa) novos; no-op
@@ -923,6 +981,7 @@ def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log, fade_edges=(0.0, 0.0))
     sw, sh = _kb_supersample(w, h)
     mb = _kb_motionblur(fps)
     fade = _kb_fade_frames()
+    cache_dir = out.parent / "_kbpre"   # PNGs pré-escalados (scale lanczos 1x, não por-frame)
     inputs, filtros, labels = [], [], []
     for k, img in enumerate(imgs):
         # -framerate fps + -t seg alimenta EXATAMENTE seg*fps frames; zoompan d=1 emite 1 frame de
@@ -930,12 +989,13 @@ def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log, fade_edges=(0.0, 0.0))
         # `on` (NÃO acumulador com teto), então nunca congela. Super-amostra (sw×sh, lanczos) p/ não
         # serrilhar e p/ o zoompan arredondar numa grade fina (anti-tremido). tmix funde o judder.
         z, x, y = _kb_expr(_KB_MODES[k % len(_KB_MODES)], frames)
-        inputs += ["-loop", "1", "-framerate", str(fps), "-t", "%.3f" % seg, "-i", str(img)]
-        chain = [
-            "scale=%d:%d:force_original_aspect_ratio=increase:flags=lanczos" % (sw, sh),
-            "crop=%d:%d" % (sw, sh),
-            "zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=%d" % (z, x, y, w, h, fps),
-        ]
+        pre = _prescale_img(ff, img, sw, sh, cache_dir, log)   # escala 1x (não por-frame) → ~1.3x
+        inputs += ["-loop", "1", "-framerate", str(fps), "-t", "%.3f" % seg, "-i", str(pre or img)]
+        chain = []
+        if not pre:   # sem pré-escala: mantém o scale/crop lanczos por-frame (comportamento antigo)
+            chain.append("scale=%d:%d:force_original_aspect_ratio=increase:flags=lanczos" % (sw, sh))
+            chain.append("crop=%d:%d" % (sw, sh))
+        chain.append("zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=%d" % (z, x, y, w, h, fps))
         if fade and frames > 2 * fade:
             st_out = (frames - fade) / float(fps)
             chain.append("fade=t=in:st=0:d=%.4f:color=black" % (fade / float(fps)))
@@ -974,10 +1034,13 @@ def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log, fade_edges=(0.0, 0.0))
         inputs2, filtros2, labels2 = [], [], []
         for k, img in enumerate(imgs):
             z, x, y = _kb_expr(_KB_MODES[k % len(_KB_MODES)], frames2)
-            inputs2 += ["-loop", "1", "-framerate", str(fps), "-t", "%.3f" % seg2, "-i", str(img)]
-            ch = ["scale=%d:%d:force_original_aspect_ratio=increase:flags=lanczos" % (sw, sh),
-                  "crop=%d:%d" % (sw, sh),
-                  "zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=%d" % (z, x, y, w, h, fps)]
+            pre = _prescale_img(ff, img, sw, sh, cache_dir, log)
+            inputs2 += ["-loop", "1", "-framerate", str(fps), "-t", "%.3f" % seg2, "-i", str(pre or img)]
+            ch = []
+            if not pre:
+                ch.append("scale=%d:%d:force_original_aspect_ratio=increase:flags=lanczos" % (sw, sh))
+                ch.append("crop=%d:%d" % (sw, sh))
+            ch.append("zoompan=z='%s':x='%s':y='%s':d=1:s=%dx%d:fps=%d" % (z, x, y, w, h, fps))
             if fade and frames2 > 2 * fade:
                 st_out = (frames2 - fade) / float(fps)
                 ch.append("fade=t=in:st=0:d=%.4f:color=black" % (fade / float(fps)))
@@ -1597,24 +1660,34 @@ def _legendar(proj, ff, video_montado, tmp, w, h, fps, log, qr_img=None, qr_frag
     except Exception as e:
         log("    ⚠ fonte da legenda não pôde ser preparada (%s) — usando fontconfig do sistema." % e)
     sub_f = "subtitles=%s%s:force_style='%s'" % (ass.name, fontsdir_frag, style)
-    if qr_img is not None and qr_frag is not None:
-        # Legenda + QR na MESMA passada, com o QR POR CIMA (escaneável): [0:v]->subtitles->[s];
-        # [1:v]->QR->[qr]; [s][qr]overlay->[v]. A legenda JÁ foi afastada da coluna do QR (margens
-        # QR-aware acima), então eles NÃO se cruzam em nenhum frame — o QR por cima não tapa a
-        # legenda, e a legenda não invade o QR. (Não basta ordem de composição; a separação é
-        # ESPACIAL — a editora quer o QR num lugar que a legenda não atrapalhe o vídeo inteiro.)
-        prep, qx, qy = qr_frag  # prep produz o label [qr] a partir do input 1
-        # -loop 1 no PNG do QR + shortest=1 no overlay: a imagem estática vira um stream que
-        # dura o vídeo INTEIRO (sem -loop ela é 1 frame só e o QR sumia após o teaser). O vídeo
-        # (input 0) manda na duração; o QR looped é cortado no fim dele.
-        fc = "[0:v]%s[s];%s;[s][qr]overlay=%s:%s:format=auto:shortest=1[v]" % (sub_f, prep, qx, qy)
-        cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", video_montado.name,
-               "-loop", "1", "-i", str(qr_img), "-filter_complex", fc, "-map", "[v]", "-map", "0:a?",
-               *_venc_args(fps), "-c:a", "copy", out.name]
-        _run(cmd, log, "legenda+qr", cwd=tmp)
-    else:
-        _run([ff, "-y", "-hide_banner", "-loglevel", "error", "-i", video_montado.name,
-              "-vf", sub_f, *_venc_args(fps), "-c:a", "copy", out.name], log, "legenda", cwd=tmp)
+
+    def _burn(hw):
+        """Queima a legenda (e o QR, quando há) no vídeo montado. `hw` = args de decode GPU (ou [])."""
+        if qr_img is not None and qr_frag is not None:
+            # Legenda + QR na MESMA passada, com o QR POR CIMA (escaneável): [0:v]->subtitles->[s];
+            # [1:v]->QR->[qr]; [s][qr]overlay->[v]. A legenda JÁ foi afastada da coluna do QR (margens
+            # QR-aware acima), então eles NÃO se cruzam em nenhum frame — o QR por cima não tapa a
+            # legenda, e a legenda não invade o QR. (Não basta ordem de composição; a separação é
+            # ESPACIAL — a editora quer o QR num lugar que a legenda não atrapalhe o vídeo inteiro.)
+            prep, qx, qy = qr_frag  # prep produz o label [qr] a partir do input 1
+            # -loop 1 no PNG do QR + shortest=1 no overlay: a imagem estática vira um stream que
+            # dura o vídeo INTEIRO (sem -loop ela é 1 frame só e o QR sumia após o teaser). O vídeo
+            # (input 0) manda na duração; o QR looped é cortado no fim dele. `hw` só antes do input 0
+            # (o vídeo H264); o QR é PNG (não decoda H264), então segue sem hwaccel.
+            fc = "[0:v]%s[s];%s;[s][qr]overlay=%s:%s:format=auto:shortest=1[v]" % (sub_f, prep, qx, qy)
+            cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", *hw, "-i", video_montado.name,
+                   "-loop", "1", "-i", str(qr_img), "-filter_complex", fc, "-map", "[v]", "-map", "0:a?",
+                   *_venc_args(fps), "-c:a", "copy", out.name]
+            _run(cmd, log, "legenda+qr", cwd=tmp)
+        else:
+            _run([ff, "-y", "-hide_banner", "-loglevel", "error", *hw, "-i", video_montado.name,
+                  "-vf", sub_f, *_venc_args(fps), "-c:a", "copy", out.name], log, "legenda", cwd=tmp)
+
+    _hw = _hwaccel_decode()
+    _burn(_hw)
+    if _hw and not (out.exists() and out.stat().st_size > 0):
+        log("    ⚠ decode GPU (hwaccel) falhou na queima da legenda — refazendo em CPU.")
+        _burn([])
     narr.unlink(missing_ok=True)
     if out.exists() and out.stat().st_size > 0:
         extra = (" + QR '%s' no vídeo inteiro (mesma passada)" % qr_img.name
@@ -1949,11 +2022,23 @@ def construir(proj, log, cancel=None, parte=None):
 
     _nparal = _corpo_paralelo()
     _res = {}
+
+    def _dur_cap(idx):
+        """Duração (s) do CORPO do capítulo idx — a MESMA fórmula do _render_cap. Só p/ ordenar
+        o agendamento (LPT); não afeta o render em si."""
+        _ini = 0.0 if (extensao and idx == 0) else bnds[idx]
+        _fim = bnds[idx + 1] if idx + 1 < len(bnds) else None
+        return (_fim - _ini) if _fim is not None else (total - _ini)
+
     if _nparal > 1 and len(caps) > 1:
         log("    corpos em paralelo: até %d capítulo(s) por vez (zoompan é single-thread)." % _nparal)
+        # LPT (longest-processing-time first): agenda do corpo mais LONGO pro mais curto. Sem isso o
+        # capítulo mais pesado (idx maior) começa por último e sobra rodando SOZINHO na cauda — sem
+        # dividir os núcleos —, inflando o tempo total (zoompan é single-thread). Reordena só o
+        # AGENDAMENTO: _res é indexado pelo idx ORIGINAL e a montagem segue em ordem de capítulo.
+        _ordem_sched = sorted(enumerate(caps), key=lambda ic: _dur_cap(ic[0]), reverse=True)
         with ThreadPoolExecutor(max_workers=_nparal) as _ex:
-            for _idx, _capa, _corpo, _msg in _ex.map(lambda ic: _render_cap(*ic),
-                                                     list(enumerate(caps))):
+            for _idx, _capa, _corpo, _msg in _ex.map(lambda ic: _render_cap(*ic), _ordem_sched):
                 _res[_idx] = (_capa, _corpo, _msg)
     else:
         for _idx, _c in enumerate(caps):
