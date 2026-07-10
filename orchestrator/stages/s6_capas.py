@@ -215,10 +215,14 @@ def run(proj, log, cancel=None, **_):
     # Duração da capa = tempo da fala "Chapter N — Título" (Etapa 3) + respiro, entre um piso
     # e um teto (título curto não fica instantâneo; título longo não estica demais). Sem a
     # narração do título (desligada / TTS falhou), a capa mantém a duração da referência.
+    # PISO = 5s (2026-07-10, pedido da editora: 'intro de capítulo 5s na tela'). Títulos curtos
+    # ("Chapter 5. Betrayal.") narram em ~2s e a capa sumia antes de dar pra ler — agora a intro
+    # fica pelo menos 5s na tela (o respiro de silêncio segura o card). Título longo cresce até o
+    # teto sem cortar a voz. Vale P1 e P2 (esta etapa é a mesma). Env ROTEIRO_COVER_DUR_MIN.
     narrar = _cover_narrar_on()
     durs = _titulo_durs(proj) if narrar else {}
     respiro = _envf("ROTEIRO_COVER_RESPIRO_S", 0.5)
-    dmin = _envf("ROTEIRO_COVER_DUR_MIN", 2.5)
+    dmin = _envf("ROTEIRO_COVER_DUR_MIN", 5.0)
     dmax = _envf("ROTEIRO_COVER_DUR_MAX", 8.0)
 
     log("▶ Etapa 6 — capas de capítulo (%d, %dx%d, %s, zoom %.2f, fonte %s)..."

@@ -22,6 +22,7 @@ Trava de crédito: a geração em lote fica bloqueada até LONGFORM_MAGNIFIC_COR
 Contrato: run(proj, log, cancel, **kw). Idempotente (âncora = images/*.png).
 """
 
+import json
 import os
 import re
 
@@ -45,8 +46,14 @@ _ANTIBUG = (
     "identidade, não precisa aparecer na cena se o prompt não pede.\n"
     "• ESPELHO/REFLEXO/VIDRO: qualquer reflexo tem de mostrar a MESMA pessoa, com a MESMA roupa e "
     "pose de quem está na frente — nunca a outra pessoa nem outra roupa.\n"
-    "• ANATOMIA HUMANA CORRETA: exatamente 2 braços, 2 pernas, 1 cabeça por pessoa, mãos com 5 "
-    "dedos; sem membros/dedos a mais ou a menos, sem corpos fundidos, sem rosto derretido.\n"
+    "• ANATOMIA HUMANA CORRETA (TRAVA DE SEGURANÇA — checar em CADA pessoa antes de finalizar): "
+    "exatamente 2 braços, 2 pernas, 1 cabeça por pessoa, mãos com 5 dedos; sem membros/dedos a "
+    "mais ou a menos, sem corpos fundidos, sem rosto derretido. BRAÇOS E MÃOS em pose NATURAL e "
+    "plausível: cotovelos e pulsos dobram só pra onde a articulação humana permite, comprimento e "
+    "proporção realistas, mãos presas ao punho na posição certa. PROIBIDO braço torto/deslocado, "
+    "dobrado ao contrário, esticado ou curto demais, saindo do lugar errado do corpo, colado no "
+    "torso de forma impossível ou fundido com o outro personagem. Na dúvida, prefira uma pose "
+    "simples (braço ao lado do corpo, mão relaxada) a uma pose complexa que possa quebrar.\n"
     "• SEM texto, legenda, subtítulo, marca-d'água, logo ou número renderizado na imagem.\n"
 )
 
@@ -84,6 +91,69 @@ def _escrever_prompts_limpos(proj, prompts):
 def _faltando(proj, total):
     """Lista dos números de imagem (1-based) que ainda não existem em images/."""
     return [i for i in range(1, total + 1) if not (proj.images_dir / ("img_%03d.png" % i)).exists()]
+
+
+# --- Manifesto de QA aprovado (img_qa_ok.json) -------------------------------------------
+# Registra quais imagens JÁ passaram no QA visual e o mtime do PNG na hora da aprovação. Fecha o
+# furo do card 84: a Etapa 5 é idempotente por images/*.png, então imagens de um render ANTERIOR
+# (geradas antes do QA existir, ou numa run onde o QA não rodou) nunca eram auditadas de novo — os
+# bugs (texto queimado tipo 'QUNT', anatomia quebrada) sobreviviam. Agora o QA checa TODA imagem
+# presente que ainda não tem aprovação registrada; regerar um PNG muda o mtime e reabre o QA nela.
+
+def _qa_ok_path(proj):
+    return proj.images_dir / "img_qa_ok.json"
+
+
+def _qa_ok_carregar(proj):
+    """{num:int -> mtime:float} das imagens já aprovadas pelo QA. {} se não há / ilegível."""
+    p = _qa_ok_path(proj)
+    if not p.exists():
+        return {}
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return {int(k): float(v) for k, v in d.items()}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _qa_ok_marcar(proj, nums):
+    """Registra `nums` como aprovadas com o mtime ATUAL do PNG (merge com o que já havia)."""
+    nums = [n for n in (nums or [])]
+    if not nums:
+        return
+    d = _qa_ok_carregar(proj)
+    for n in nums:
+        f = proj.images_dir / ("img_%03d.png" % n)
+        try:
+            if f.exists():
+                d[int(n)] = f.stat().st_mtime
+        except OSError:
+            pass
+    try:
+        _qa_ok_path(proj).write_text(
+            json.dumps({str(k): v for k, v in sorted(d.items())}, ensure_ascii=False),
+            encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _nao_auditadas(proj, total):
+    """Nums (1-based) de imagens PRESENTES que ainda NÃO passaram no QA — nunca auditadas OU
+    regeradas depois da aprovação (mtime mudou). É o conjunto que o QA precisa checar nesta run."""
+    ok = _qa_ok_carregar(proj)
+    out = []
+    for i in range(1, total + 1):
+        f = proj.images_dir / ("img_%03d.png" % i)
+        if not f.exists():
+            continue
+        try:
+            mt = f.stat().st_mtime
+        except OSError:
+            out.append(i)
+            continue
+        if i not in ok or abs(ok[i] - mt) > 1.0:   # tolerância de 1s (cópia/OneDrive mexe no mtime)
+            out.append(i)
+    return out
 
 
 def _instrucao(proj, total, faltam, aspect):
@@ -157,33 +227,37 @@ def run(proj, log, cancel=None, **_):
         raise ErroPipeline("prompts_imagens.txt está vazio.")
 
     proj.images_dir.mkdir(parents=True, exist_ok=True)
-    faltam = _faltando(proj, total)
-    if not faltam:
-        log("    %d imagens já existem em images/ — Etapa 5 pulada." % total)
-        return
-
-    # Trava de crédito (opt-in explícito) — evita queimar crédito Magnific sem querer.
-    magnific_seam.garantir_corpo_liberado()
-
-    _escrever_prompts_limpos(proj, prompts)
+    _escrever_prompts_limpos(proj, prompts)   # sempre — o loop de QA/regeneração também o lê
     aspect = _aspect()
-    log("▶ Etapa 5 — imagens do corpo (%d total, %d faltando, modelo=%s, %s)..."
-        % (total, len(faltam), magnific_seam.modo(), aspect))
-    magnific_seam.gerar(proj, log, cancel, _instrucao(proj, total, faltam, aspect), modelo="sonnet")
+    faltam = _faltando(proj, total)
 
-    ainda = _faltando(proj, total)
-    if ainda:
-        raise ErroPipeline(
-            "Etapa 5 não gerou %d imagem(ns): %s. Veja o log do Magnific acima e rode de novo "
-            "(as prontas são reaproveitadas)."
-            % (len(ainda), ", ".join("img_%03d" % i for i in ainda[:10])))
-    log("    ✓ %d imagens em images/ (img_001..img_%03d.png)." % (total, total))
+    if faltam:
+        # Trava de crédito (opt-in explícito) — evita queimar crédito Magnific sem querer.
+        magnific_seam.garantir_corpo_liberado()
+        log("▶ Etapa 5 — imagens do corpo (%d total, %d faltando, modelo=%s, %s)..."
+            % (total, len(faltam), magnific_seam.modo(), aspect))
+        magnific_seam.gerar(proj, log, cancel, _instrucao(proj, total, faltam, aspect), modelo="sonnet")
+        ainda = _faltando(proj, total)
+        if ainda:
+            raise ErroPipeline(
+                "Etapa 5 não gerou %d imagem(ns): %s. Veja o log do Magnific acima e rode de novo "
+                "(as prontas são reaproveitadas)."
+                % (len(ainda), ", ".join("img_%03d" % i for i in ainda[:10])))
+        log("    ✓ %d imagens em images/ (img_001..img_%03d.png)." % (total, total))
+    else:
+        log("    %d imagens já existem em images/ — geração pulada; conferindo o QA visual." % total)
 
     # QA VISUAL + REGENERAÇÃO: abre cada imagem, detecta bug de geração (identidade trocada,
-    # espelho incoerente, anatomia quebrada, texto) e regera só as bugadas — até N rodadas.
-    # Só checa o que foi (re)gerado AGORA (as que já existiam foram aprovadas em rodadas
-    # anteriores). Vale P1 e P2 (a P2 roda esta mesma etapa na pasta irmã) e todas as categorias.
-    _qa_regen(proj, log, cancel, total, aspect, checar=faltam)
+    # espelho incoerente, anatomia quebrada, texto queimado tipo 'QUNT') e regera só as bugadas —
+    # até N rodadas. Checa as (re)geradas AGORA **e** as PRÉ-EXISTENTES que ainda não passaram no QA
+    # (imagens de um render anterior — o furo do card 84: elas nunca eram auditadas, então texto na
+    # imagem / anatomia quebrada sobreviviam). Idempotente via manifesto img_qa_ok.json (regerar uma
+    # imagem muda o mtime e reabre o QA só nela). Vale P1 e P2 e todas as categorias.
+    a_checar = _nao_auditadas(proj, total)
+    if a_checar:
+        _qa_regen(proj, log, cancel, total, aspect, checar=a_checar)
+    else:
+        log("    ✓ todas as %d imagens já auditadas pelo QA (img_qa_ok.json) — nada a re-checar." % total)
 
 
 def _qa_regen(proj, log, cancel, total, aspect, checar):
@@ -203,6 +277,9 @@ def _qa_regen(proj, log, cancel, total, aspect, checar):
         if veredito is None:              # QA errou / sem arquivo → degrada sem bloquear
             return
         bugadas = veredito.get("bugged") or []
+        # Marca como aprovadas (manifesto) as checadas nesta rodada que NÃO deram bug — assim não
+        # voltam ao QA na próxima run (idempotência barata; regerar muda o mtime e reabre o QA).
+        _qa_ok_marcar(proj, [n for n in checar if n not in bugadas])
         if not bugadas:                   # tudo limpo (ou QA desligado)
             return
         if rodada == max_rounds:
@@ -210,6 +287,18 @@ def _qa_regen(proj, log, cancel, total, aspect, checar):
                 "Revise à mão ou rode a Etapa 5 de novo (ROTEIRO_IMG_QA_MAX_ROUNDS aumenta as "
                 "tentativas)."
                 % (len(bugadas), max_rounds, ", ".join("img_%03d" % n for n in bugadas)))
+            return
+        # Regenerar gasta crédito Magnific — exige a trava liberada. Se ela NÃO estiver (esta run
+        # pode ter caído direto no QA, sem passar pela geração que checa a trava), avisa e para SEM
+        # derrubar a esteira: o vídeo monta com as imagens atuais e o usuário libera o crédito e
+        # roda a Etapa 5 de novo pra refazer as bugadas.
+        try:
+            magnific_seam.garantir_corpo_liberado()
+        except ErroPipeline:
+            log("    ⚠ %d imagem(ns) bugada(s), mas a geração está travada "
+                "(LONGFORM_MAGNIFIC_CORPO_OK≠1) — não vou regerar. Libere o crédito e rode a "
+                "Etapa 5 de novo pra refazê-las: %s"
+                % (len(bugadas), ", ".join("img_%03d" % n for n in bugadas)))
             return
         issues = veredito.get("issues") or {}
         for n in bugadas:                 # apaga as bugadas → viram 'faltando' pra regerar

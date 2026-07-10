@@ -357,6 +357,25 @@ def _legenda_on():
     return v not in ("0", "off", "none", "nao", "não", "no", "false")
 
 
+def _abertura_legenda_on():
+    """Se a CENA DE ABERTURA (cena animada no começo) deve levar a legenda re-transcrita queimada
+    por cima. DESLIGADA por padrão (2026-07-10, pedido da editora: 'tirar legenda da cena animada
+    no começo') — a abertura é um cold-open cinematográfico e a legenda por cima poluía. Ligue com
+    ROTEIRO_ABERTURA_LEGENDA=1 se quiser a legenda de volta na abertura. Vale P1 e P2."""
+    v = os.environ.get("ROTEIRO_ABERTURA_LEGENDA", "0").strip().lower()
+    return v not in ("0", "off", "none", "nao", "não", "no", "false", "")
+
+
+def _capa_legenda_on():
+    """Se as CAPAS de troca de capítulo (seg_NN_capa — o cartão 'Chapter N — Título') devem levar
+    a legenda re-transcrita queimada por cima. DESLIGADA por padrão (2026-07-10, pedido da editora:
+    'remover a legenda nas trocas de capítulo pra o vídeo ficar mais limpo') — a capa JÁ mostra o
+    título escrito, e a legenda amarela da narração do título ('Chapter One') por cima poluía. Ligue
+    com ROTEIRO_CAPA_LEGENDA=1 se quiser a legenda de volta nas capas. Vale P1 e P2."""
+    v = os.environ.get("ROTEIRO_CAPA_LEGENDA", "0").strip().lower()
+    return v not in ("0", "off", "none", "nao", "não", "no", "false", "")
+
+
 def _legenda_cor():
     """Cor primária da legenda no formato ASS &HAABBGGRR. Default AMARELO (&H0000FFFF) — casa
     com os vídeos OFICIAIS do canal (legenda serifada amarela, não branca). Aceita apelido
@@ -1559,13 +1578,18 @@ def _qr_bbox_frame(qr_img, w, h):
 
 
 def _legenda_margens_qr(qr_img, w, h):
-    """Margens (MarginL, MarginR, MarginV) a aplicar na legenda p/ ela NÃO cruzar a coluna do QR
-    (a editora: 'o QR num lugar que a legenda não atrapalhe o vídeo inteiro'). Mede a bbox opaca do
-    QR; se ela invade a faixa vertical da legenda (terço inferior), empurra a legenda pro lado
-    OPOSTO (MarginR se o QR está à direita, MarginL se à esquerda). Se não sobra largura útil (QR
-    largo/central), sobe a legenda p/ ACIMA do QR (MarginV). (0,0,0) se não precisa / não mediu.
-    Só vale com FIT=1 (QR full-frame posicionado no PNG); FIT=0 não auto-ajusta. Env de folga:
-    ROTEIRO_QR_LEGENDA_PAD (px)."""
+    """Margens extra (MarginL, MarginR, MarginV) a aplicar na legenda por causa do QR.
+
+    DESLIGADO desde 2026-07-10 (pedido da editora): a legenda fica EMBAIXO e CENTRALIZADA (MarginV
+    padrão ~0.14·h, Alignment=2), como nos vídeos oficiais do canal — o QR convive por CIMA no canto
+    inferior. Antes esta função SUBIA a legenda pra acima do topo do QR (MarginV alto), o que jogava
+    a legenda pro MEIO da tela quando o card do QR era grande (queixa: 'a legenda foi pro meio, quero
+    ela embaixo que nem tava antes'). Agora retorna sempre (0,0,0) — sem deslocamento. Reversível:
+    ROTEIRO_QR_LEGENDA_EVITAR=1 reativa o antigo 'subir acima do QR'."""
+    if os.environ.get("ROTEIRO_QR_LEGENDA_EVITAR", "0").strip().lower() not in (
+            "1", "on", "sim", "true", "yes"):
+        return (0, 0, 0)
+    # --- modo legado (opt-in): sobe a legenda pra acima do QR (pode ir pro meio se o QR for grande) ---
     try:
         import qr_overlay
         if not qr_overlay._fit():
@@ -1580,16 +1604,10 @@ def _legenda_margens_qr(qr_img, w, h):
         pad = max(10, int(os.environ.get("ROTEIRO_QR_LEGENDA_PAD", str(int(w * 0.02)))))
     except (TypeError, ValueError):
         pad = int(w * 0.02)
-    # A legenda mora no terço inferior; se o QR fica todo ACIMA dele, não há conflito.
     if y1 < h * 0.72:
         return (0, 0, 0)
-    # CENTRALIZADA (pedido da editora 2026-07-10: 'legenda centralizada'). Antes empurrávamos a
-    # legenda pro lado OPOSTO ao QR (MarginL/MarginR) — mas isso a descentraliza. Agora mantemos o
-    # centro horizontal (sem MarginL/R) e SUBIMOS a legenda pra ACIMA do topo do QR (MarginV alto),
-    # então ela fica centrada E o QR (canto inferior) segue livre/escaneável. Nunca desce abaixo do
-    # MarginV padrão (~0.14·h): usamos o maior entre o padrão e o necessário pra limpar o QR.
     base_mv = int(h * 0.14)
-    needed = int(h - y0) + pad          # bottom da legenda acima do topo do QR (y0)
+    needed = int(h - y0) + pad
     return (0, 0, max(base_mv, needed))
 
 
@@ -1830,8 +1848,15 @@ def construir(proj, log, cancel=None, parte=None):
                 _mux(ff, vmudo, aud, seg, log)
                 vmudo.unlink(missing_ok=True); aud.unlink(missing_ok=True)
         if seg.exists() and seg.stat().st_size > 0:
-            log("    ABERTURA (cena animada%s) adicionada (%.1fs)."
-                % (" com diálogo" if _tem_audio(ff, seg) else "", _dur(ff, seg)))
+            # A cena animada NÃO recebe a legenda re-transcrita por cima (pedido da editora
+            # 2026-07-10): marca como peça de "legenda própria" p/ o passe _legendar dropar os
+            # blocos que caem no intervalo dela (mesma trava das intros/tutorial). Reversível por
+            # ROTEIRO_ABERTURA_LEGENDA=1.
+            if not _abertura_legenda_on():
+                detalhe_segs.add(seg)
+            log("    ABERTURA (cena animada%s) adicionada (%.1fs%s)."
+                % (" com diálogo" if _tem_audio(ff, seg) else "", _dur(ff, seg),
+                   "" if _abertura_legenda_on() else ", sem legenda"))
             return seg
         return None
 
@@ -1994,14 +2019,19 @@ def construir(proj, log, cancel=None, parte=None):
 
         def _seg_corpo():
             s = _seg_path("%02d_corpo" % n)
-            if _seg_fresco(s, proj.narration_mp3):
+            _imgs_cap = imgs_por_cap.get(n, []) or todas_imgs
+            # Frescor: o corpo é refeito se o áudio da narração OU qualquer IMAGEM do capítulo ficou
+            # mais nova que o segmento. Sem as imagens aqui, regerar um PNG bugado (Etapa 5/QA) não
+            # invalidava o corpo e a montagem reusava o seg velho bugado — a queixa 'foi feita com as
+            # mesmas imagens' (card 84). As imagens vêm como str; _seg_fresco espera Path.
+            if _seg_fresco(s, proj.narration_mp3, *[Path(p) for p in _imgs_cap]):
                 return s
             dur = (fim - ini) if fim is not None else (total - ini)
             dur = max(1.0, dur)
             vmudo = tmp / ("_v_corpo_%02d.mp4" % n)
             # bordas do corpo fazem fade ←/→ preto (contra a tela preta da troca); (0,0) se desligado
             _fe = _blackgap_fade()
-            _kenburns_imagens(ff, imgs_por_cap.get(n, []) or todas_imgs, dur, w, h, fps, vmudo, log,
+            _kenburns_imagens(ff, _imgs_cap, dur, w, h, fps, vmudo, log,
                               fade_edges=(_fe, _fe))
             # o vídeo pode sair um tico maior/menor que dur (arredondamento de frames);
             # a fatia de áudio manda — usamos -shortest no mux.
@@ -2258,17 +2288,25 @@ def construir(proj, log, cancel=None, parte=None):
     # Faixas (ini, fim) das PEÇAS FIXAS de detalhe na timeline concatenada — a legenda queimada
     # é SUPRIMIDA nelas (já trazem legenda própria embutida). Offset = soma das durações dos
     # segmentos na ordem; casa com a timeline do concat (a legenda é re-transcrita do concat).
+    # As CAPAS de troca de capítulo (seg_NN_capa) entram como "legenda própria": a capa já mostra o
+    # título escrito ('Chapter N — Título'), então a legenda re-transcrita da narração do título
+    # ('Chapter One') por cima é redundante e polui (pedido da editora 2026-07-10 — vídeo mais limpo
+    # nas trocas). Suprimível por ROTEIRO_CAPA_LEGENDA=1 (traz a legenda de volta nas capas).
+    _capa_limpa = not _capa_legenda_on()
     mudos_ranges = []
-    if detalhe_segs:
+    if detalhe_segs or _capa_limpa:
         off = 0.0
+        n_capas = 0
         for s in segmentos:
             d = _dur(ff, s)
-            if s in detalhe_segs:
+            if s in detalhe_segs or (_capa_limpa and "_capa" in s.name):
                 mudos_ranges.append((off, off + d))
+                if "_capa" in s.name:
+                    n_capas += 1
             off += d
         if mudos_ranges:
-            log("    legenda: %d peça(s) de legenda própria protegida(s) (sem legenda queimada)."
-                % len(mudos_ranges))
+            log("    legenda: %d faixa(s) protegida(s) sem legenda queimada (%d capa[s] de troca, "
+                "resto = peças de legenda própria)." % (len(mudos_ranges), n_capas))
 
     # --- 5) LEGENDA (+ QR fundido) — re-transcrita p/ casar com cortes/pausas --
     # O QR fixo da ISCA (P1) é resolvido ANTES e, quando há legenda, entra NA MESMA passada de

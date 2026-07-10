@@ -131,7 +131,11 @@ DEFAULTS = {
     "ROTEIRO_IMG_QA_MAX_ROUNDS": "2",     # rodadas de regeneração das imagens bugadas
     "ROTEIRO_IMG_QA_MODEL": "sonnet",     # modelo do QA visual (opus = mais rigor, + caro em lote)
     # Capas de capítulo (Etapa 6) — specs do config_alves.json → covers.
-    "ROTEIRO_COVER_DURACAO_S": "5",       # duração da capa (0.8–8)
+    "ROTEIRO_COVER_DURACAO_S": "5",       # duração da capa quando NÃO há narração de título (0.8–8)
+    # PISO da capa quando o título é narrado (a duração vira max(piso, fala+respiro), teto 8s).
+    # 5s desde 2026-07-10 (pedido: 'intro de capítulo 5s na tela') — título curto não some antes de
+    # dar pra ler. Vale P1 e P2.
+    "ROTEIRO_COVER_DUR_MIN": "5",
     "ROTEIRO_COVER_FPS": "30",
     "ROTEIRO_COVER_FADE_IN_S": "0.6",
     "ROTEIRO_COVER_ZOOM": "1.1",          # Ken-Burns leve
@@ -188,6 +192,17 @@ DEFAULTS = {
     # Legenda queimada (vertical). Re-transcreve o áudio já montado (Whisper) p/ sincronia
     # exata (a montagem insere capas/silêncio que desincronizam a narration.srt original).
     "ROTEIRO_LEGENDA": "1",               # 0 desliga
+    # Legenda queimada por cima da CENA DE ABERTURA (cena animada no começo, P1 e P2). 0 (padrão,
+    # 2026-07-10) = sem legenda na abertura (cold-open cinematográfico limpo); 1 = legenda de volta.
+    "ROTEIRO_ABERTURA_LEGENDA": "0",
+    # Legenda queimada por cima das CAPAS de troca de capítulo (o cartão 'Chapter N — Título'). 0
+    # (padrão, 2026-07-10, pedido da editora: 'vídeo mais limpo nas trocas') = sem legenda na capa
+    # (ela já mostra o título escrito); 1 = legenda re-transcrita de volta por cima da capa.
+    "ROTEIRO_CAPA_LEGENDA": "0",
+    # Convivência legenda × QR. 0 (padrão, 2026-07-10, pedido da editora): a legenda fica EMBAIXO e
+    # CENTRALIZADA e o QR convive por cima no canto — como nos vídeos oficiais. 1 = modo legado que
+    # SOBE a legenda pra acima do QR (jogava ela pro meio da tela quando o card do QR era grande).
+    "ROTEIRO_QR_LEGENDA_EVITAR": "0",
     # ROTEIRO_CAPTION_FONTSIZE / ROTEIRO_CAPTION_MARGINV: default derivado da altura (~3.3% / ~16%).
     # Sincronia narração x roteiro (anti-dessincronia — o problema do 256).
     "ROTEIRO_TTS_STALE": "regen",         # narration.mp3 mais velho que roteiro.txt: regen|warn|off
