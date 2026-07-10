@@ -49,13 +49,59 @@ STAGES = {
 }
 
 
+def _stale_off():
+    """A checagem de obsolescência está desligada? (ROTEIRO_TTS_STALE=off)."""
+    return os.environ.get("ROTEIRO_TTS_STALE", "regen").strip().lower() == "off"
+
+
+def _mais_velho(a, b):
+    """True se o arquivo `a` (mtime) é mais velho que `b`, com folga ROTEIRO_TTS_STALE_TOL."""
+    try:
+        tol = float(os.environ.get("ROTEIRO_TTS_STALE_TOL", "2"))
+        return a.stat().st_mtime + tol < b.stat().st_mtime
+    except (OSError, ValueError):
+        return False
+
+
+def _narracao_obsoleta(proj):
+    """narration.mp3 mais velho que roteiro.txt = áudio de OUTRO draft (roteiro regerado depois
+    do TTS). Dispara em regen (regenera) E warn (só avisa no run()); off desliga. Marcar a
+    Etapa 3 não-pronta é o que faz o pipeline CHAMAR o run() — senão a trava dentro dele nunca
+    roda numa re-rodada 'já pronta'. Ver s3_narracao._narracao_stale."""
+    if _stale_off() or not (proj.existe(proj.narration_mp3) and proj.existe(proj.roteiro)):
+        return False
+    return _mais_velho(proj.narration_mp3, proj.roteiro)
+
+
+def _montagem_obsoleta(proj):
+    """out/final.mp4 mais velho que a narração = render de um áudio anterior (ex.: a Etapa 3
+    acabou de regenerar o TTS obsoleto). Força re-montar em vez de manter o vídeo dessincronizado.
+    off desliga. No caminho feliz (audio gerado -> montagem) o final.mp4 é mais NOVO, não dispara."""
+    if _stale_off():
+        return False
+    fin = proj.dir / "out" / "final.mp4"
+    if not (fin.exists() and proj.existe(proj.narration_mp3)):
+        return False
+    return _mais_velho(fin, proj.narration_mp3)
+
+
 def _etapa_pronta(proj, n):
     """True se o artefato-âncora da etapa n já existe (base da idempotência/‘Continuar’)."""
     alvo = STAGES[n][1]
     if "*" in alvo:
         d, pad = alvo.split("/", 1)
-        return bool(list((proj.dir / d).glob(pad)))
-    return proj.existe(proj.dir / alvo)
+        pronta = bool(list((proj.dir / d).glob(pad)))
+    else:
+        pronta = proj.existe(proj.dir / alvo)
+    # Anti-áudio-velho (o problema de sincronia do 256): marcar a etapa NÃO-pronta força o
+    # pipeline a chamar o run() dela. Etapa 3 = narração de outro draft; Etapa 7 = montagem de
+    # um áudio anterior (após a Etapa 3 regenerar). Sem isto, a re-rodada 'já pronta' pula tudo
+    # e o vídeo sai/continua dessincronizado.
+    if pronta and n == 3 and _narracao_obsoleta(proj):
+        return False
+    if pronta and n == 7 and _montagem_obsoleta(proj):
+        return False
+    return pronta
 
 
 # --- trava .running por projeto (uma rodada por card; porta do long-form) -------------
@@ -203,9 +249,22 @@ def _preparar_projeto_p2(parent, slug, log):
 
 # --- laço principal -------------------------------------------------------------------
 
+def _fmt_dur(seg):
+    """Formata segundos como '1h 03m 20s' / '4m 12s' / '38s' pro log de conclusão."""
+    seg = int(round(seg))
+    h, r = divmod(seg, 3600)
+    m, s = divmod(r, 60)
+    if h:
+        return "%dh %02dm %02ds" % (h, m, s)
+    if m:
+        return "%dm %02ds" % (m, s)
+    return "%ds" % s
+
+
 def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
              slug=None, card_query="Alpha King", card_id=None, categoria=None,
              parte="p1", pular_gates=False, refazer=False, **extra):
+    t0 = time.perf_counter()
     etapas = set(etapas or TODAS)
     parent = _garantir_projeto(slug, log)
     # Parte 2 = vídeo próprio numa pasta irmã. `proj` passa a apontar pra P2; todas as etapas
@@ -247,7 +306,7 @@ def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
                 _gate(proj, n, log, cancel)
     finally:
         _liberar_lock(lock)
-    log("Concluído.")
+    log("Concluído em %s (montagem do vídeo completo)." % _fmt_dur(time.perf_counter() - t0))
     return proj
 
 
