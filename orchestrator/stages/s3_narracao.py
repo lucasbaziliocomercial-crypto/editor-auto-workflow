@@ -515,6 +515,70 @@ def _modo_stale():
     return v if v in ("regen", "warn", "off") else "regen"
 
 
+# ---------------------------------------------------------------------------
+# Trava de COMPLETUDE — a narração cobre o FIM do roteiro?
+# ---------------------------------------------------------------------------
+# Queixa recorrente da editora (2026-07-11): "o áudio corta quase no fim da história — falta um
+# pouco pra terminar". Esta trava confere, DEPOIS do TTS+SRT, se o narration.mp3 REALMENTE contém
+# as últimas palavras do que deveria ser narrado (roteiro_tts.txt), comparando com a CAUDA da
+# transcrição real (narration.srt, feita pelo Whisper a partir do PRÓPRIO áudio). Se as palavras
+# finais do roteiro não aparecem no fim da transcrição, o áudio saiu truncado — e a montagem
+# renderizaria a história sem o desfecho. Vale P1 e P2 (o roteiro_tts já é o texto final de cada).
+# Tolerante ao erro do Whisper (compara OVERLAP de tokens, não substring exata: "ring"->"rang",
+# "bought"->"bot" etc. não derrubam). Modo por ROTEIRO_TTS_COMPLETUDE=warn(default)|fail|off.
+
+def _completude_modo():
+    v = os.environ.get("ROTEIRO_TTS_COMPLETUDE", "warn").strip().lower()
+    return v if v in ("warn", "fail", "off") else "warn"
+
+
+def _tokens(s):
+    return re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower()).split()
+
+
+def _srt_texto(path):
+    """Só o TEXTO falado de uma .srt (descarta índices e linhas de tempo)."""
+    linhas = []
+    for ln in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        s = ln.strip()
+        if not s or s.isdigit() or "-->" in s:
+            continue
+        linhas.append(s)
+    return " ".join(linhas)
+
+
+def verificar_completude(proj, log):
+    """Falha/avisa se a narração não cobrir o FIM do roteiro. Compara as ~12 últimas palavras de
+    roteiro_tts.txt com a cauda da transcrição real (narration.srt). >=50% presentes = OK."""
+    modo = _completude_modo()
+    if modo == "off":
+        return
+    if not (proj.existe(proj.roteiro_tts) and proj.existe(proj.narration_srt)):
+        return
+    alvo = _tokens(proj.roteiro_tts.read_text(encoding="utf-8", errors="replace"))
+    if len(alvo) < 8:
+        return
+    ultimas = alvo[-12:]                              # as ~12 palavras finais do roteiro
+    trans = _tokens(_srt_texto(proj.narration_srt))
+    if not trans:
+        return
+    cauda = set(trans[-80:])                          # ~80 palavras finais da transcrição
+    presentes = sum(1 for w in ultimas if w in cauda)
+    frac = presentes / len(ultimas)
+    if frac >= 0.5:
+        log("    ✓ completude OK: %d/%d palavras finais do roteiro presentes no fim da narração."
+            % (presentes, len(ultimas)))
+        return
+    msg = ("narração TRUNCADA — só %d de %d palavras finais do roteiro aparecem no fim da "
+           "transcrição (narration.srt). O áudio provavelmente cortou ANTES do fim da história "
+           "(\"...%s\"). CORREÇÃO: apague na pasta do projeto narration.mp3, narration_raw.mp3, "
+           ".pausas_otimizadas e narration.srt e rode a Etapa 3 de novo. Ignorar: "
+           "ROTEIRO_TTS_COMPLETUDE=off." % (presentes, len(ultimas), " ".join(alvo[-8:])))
+    if modo == "fail":
+        raise ErroPipeline(msg)
+    log("    ⚠ " + msg)
+
+
 def run(proj, log, cancel=None, **_):
     preparar_texto(proj, log)
 
@@ -559,6 +623,9 @@ def run(proj, log, cancel=None, **_):
         if not proj.existe(proj.narration_srt):
             raise ErroPipeline("Whisper não gerou narration.srt.")
         log("    ✓ narration.srt pronto (timestamps reais da narração).")
+
+    # Trava de COMPLETUDE: a narração real cobre o FIM do roteiro? (queixa 'corta no fim da história')
+    verificar_completude(proj, log)
 
     # Narração das trocas de capítulo (mini-TTS por título) — alimenta a capa (Etapas 6 e 7).
     sintetizar_titulos(proj, log, cancel)

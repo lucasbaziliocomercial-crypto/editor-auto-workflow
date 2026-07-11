@@ -394,16 +394,35 @@ def _legenda_central_cta(proj, ff, video, audio, w, h, fps, tmp, log):
     except Exception as e:
         log("    ⚠ CTA: falha ao preparar a legenda central (%s)." % e)
         return None
+    # MAIÚSCULAS: a legenda de referência da CTA (o clipe do editor) é toda em CAPS. Aplica o
+    # uppercase no TEXTO dos eventos Dialogue do .ass (sem tocar em tags). Env ROTEIRO_CTA_CAPTION_UPPER=0
+    # volta pra caixa normal.
+    if os.environ.get("ROTEIRO_CTA_CAPTION_UPPER", "1").strip().lower() not in (
+            "0", "off", "no", "false", "nao", "não"):
+        try:
+            _linhas = []
+            for _ln in ass.read_text(encoding="utf-8", errors="replace").splitlines():
+                if _ln.startswith("Dialogue:"):
+                    _c = _ln.split(",", 9)
+                    if len(_c) == 10:
+                        _c[9] = _c[9].upper()
+                        _ln = ",".join(_c)
+                _linhas.append(_ln)
+            ass.write_text("\n".join(_linhas), encoding="utf-8")
+        except OSError:
+            pass
     fs = os.environ.get("ROTEIRO_CTA_CAPTION_FONTSIZE", str(max(44, int(h * 0.070))))
-    # FONTE e COR PRÓPRIAS da CTA (item da editora 2026-07-10: 'o texto do CTA deve ser centralizado
-    # e com OUTRA FONTE e COR'). Default = distinto do corpo (corpo = Times amarelo): fonte da casa
-    # 'Playfair Display' + BRANCO. Ambos overridáveis por env. (O alinhamento meio-centro é o
-    # Alignment=10 aplicado no `style` abaixo — convenção SSA do force_style; ver nota lá.)
-    cta_font = (os.environ.get("ROTEIRO_CTA_CAPTION_FONT", "") or "Playfair Display").strip()
+    # ESTILO DA CTA = a legenda de referência do editor (opção da editora 2026-07-11, imagem-modelo):
+    # sans PESADA em MAIÚSCULAS, BRANCA, contorno preto GROSSO + sombra forte, centralizada. Bem
+    # distinto da legenda do corpo (Times amarelo). Default 'Arial Black' (ariblk.ttf, resolvido pelo
+    # fontsdir via _fonte_legenda_arquivo). Fonte/cor/contorno/sombra overridáveis por env.
+    cta_font = (os.environ.get("ROTEIRO_CTA_CAPTION_FONT", "") or "Arial Black").strip()
     _cor = (os.environ.get("ROTEIRO_CTA_CAPTION_COLOR", "") or "").strip()
     _apel = {"amarelo": "&H0000FFFF", "yellow": "&H0000FFFF",
              "branco": "&H00FFFFFF", "white": "&H00FFFFFF"}
     cta_cor = _apel.get(_cor.lower(), _cor) or "&H00FFFFFF"
+    _outline = os.environ.get("ROTEIRO_CTA_CAPTION_OUTLINE", "4")
+    _shadow = os.environ.get("ROTEIRO_CTA_CAPTION_SHADOW", "2")
     # Alignment=10 = MEIO-CENTRO. ATENÇÃO: o `force_style` do filtro `subtitles` do ffmpeg
     # interpreta o Alignment na convenção SSA v4 LEGACY (numpad deslocado), NÃO na ASS v4+ (\an).
     # Em SSA legacy: 1/2/3 = base L/C/R, 5/6/7 = topo L/C/R, 9/10/11 = meio L/C/R. Por isso o
@@ -411,8 +430,8 @@ def _legenda_central_cta(proj, ff, video, audio, w, h, fps, tmp, log):
     # de cima (bug 2026-07-10, editora: 'o texto do CTA tem que ficar centralizado'). Meio-centro
     # = 10. (A legenda global do corpo usa Alignment=2 = base-centro e sempre funcionou.)
     style = ("FontName=%s,Fontsize=%s,Bold=1,PrimaryColour=%s,OutlineColour=&H00000000,"
-             "BackColour=&H64000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=10,MarginV=0"
-             % (cta_font, fs, cta_cor))
+             "BackColour=&H96000000,BorderStyle=1,Outline=%s,Shadow=%s,Alignment=10,MarginV=0"
+             % (cta_font, fs, cta_cor, _outline, _shadow))
     fontsdir_frag = ""
     try:
         _ff_file = MV._fonte_legenda_arquivo(cta_font)

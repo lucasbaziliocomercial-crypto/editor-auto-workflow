@@ -306,6 +306,11 @@ class App:
         self.v_refazer = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt, text="Refazer (limpa o artefato das etapas marcadas antes de rodar)",
                         variable=self.v_refazer).pack(anchor="w", pady=2)
+        # Atalho: no Refazer (do zero OU pela caixa acima), PRESERVA as imagens já geradas (Etapa 5).
+        # As boas são reutilizadas; o QA regenera só as bugadas — não queima crédito Magnific à toa.
+        self.v_reusar_imgs = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opt, text="…mas reutilizar as imagens que já deram certo (não regera no Magnific)",
+                        variable=self.v_reusar_imgs).pack(anchor="w", pady=2)
 
         # Barra de ações + log: FORA da área rolável (parent=root), pinados no rodapé com
         # side="bottom". Ordem: bar primeiro → fica na borda de baixo; log depois → logo acima.
@@ -797,13 +802,17 @@ class App:
         self._aplicar_modelo_img()
         partes = ["p1", "p2"] if self.v_parte.get() == "ambas" else [self.v_parte.get()]
         self._lancar(dict(etapas=etapas, partes=partes, card=card, slug=slug, categoria=cat,
-                          pular_gates=self.v_gates.get(), refazer=self.v_refazer.get()))
+                          pular_gates=self.v_gates.get(), refazer=self.v_refazer.get(),
+                          refazer_manter=({5} if self.v_reusar_imgs.get() else None)))
 
     def refazer_do_zero(self):
         """Botão 'Refazer do zero': regenera o card INTEIRO (etapas 1–8, refazer=ON) num clique, no
         card/partes selecionados. Diferente do 'Rodar' normal (que só refaz sozinho as etapas
         locais 3/6/7 e reusa o resto): aqui apaga TUDO, inclusive as imagens do corpo — que voltam
-        a queimar crédito no Magnific. Por isso confirma antes."""
+        a queimar crédito no Magnific. Por isso confirma antes.
+
+        Exceção: a caixa '…mas reutilizar as imagens que já deram certo' PRESERVA a Etapa 5 —
+        refaz todo o resto do zero mas reaproveita as imagens boas (o QA regenera só as bugadas)."""
         card = self.cards.get(self.cb_card.get())
         slug = self.e_slug.get().strip()
         cat = self.cb_cat.get().strip() or None
@@ -811,21 +820,28 @@ class App:
             self._log("Escolha um card no dropdown (Categoria → Card)."); return
         if not slug:
             self._log("Slug vazio."); return
+        reusar = self.v_reusar_imgs.get()
         partes_lbl = "P1 + P2" if self.v_parte.get() == "ambas" else self.v_parte.get().upper()
+        img_linha = ("• IMAGENS do corpo — REUTILIZADAS (as que já deram certo); o QA regenera só as "
+                     "bugadas. NÃO consome crédito à toa."
+                     if reusar else
+                     "• IMAGENS do corpo — regeradas no Magnific (consome CRÉDITO).")
         if not messagebox.askyesno(
                 "Refazer do zero?",
                 "Vai REGERAR o card inteiro (%s), etapas 1–8, apagando os artefatos atuais:\n\n"
                 "• roteiro, personagens, narração, capas e montagem — reaplica TODAS as mudanças "
                 "novas do código;\n"
-                "• IMAGENS do corpo — regeradas no Magnific (consome CRÉDITO).\n\n"
-                "Continuar?" % partes_lbl):
+                "%s\n\n"
+                "Continuar?" % (partes_lbl, img_linha)):
             return
         self._aplicar_modelo_img()
         partes = ["p1", "p2"] if self.v_parte.get() == "ambas" else [self.v_parte.get()]
         etapas = sorted(n for n in self.vars if n in PRONTAS)
-        self._log("♻ Refazer do zero: card=%s | etapas %s | %s | refazer=ON" % (slug, etapas, partes))
+        self._log("♻ Refazer do zero: card=%s | etapas %s | %s | refazer=ON%s"
+                  % (slug, etapas, partes, " | REUTILIZANDO imagens (Etapa 5 preservada)" if reusar else ""))
         self._lancar(dict(etapas=etapas, partes=partes, card=card, slug=slug, categoria=cat,
-                          pular_gates=self.v_gates.get(), refazer=True))
+                          pular_gates=self.v_gates.get(), refazer=True,
+                          refazer_manter=({5} if reusar else None)))
 
     def continuar(self):
         """Retoma a última rodada de onde parou — inclusive na PARTE certa: se o erro caiu na P2,
@@ -868,7 +884,8 @@ class App:
                                       etapas=params["etapas"], log=self._push, cancel=self.cancel,
                                       slug=params["slug"], card_id=params["card"],
                                       categoria=params["categoria"], parte=pt,
-                                      pular_gates=params["pular_gates"], refazer=params["refazer"])
+                                      pular_gates=params["pular_gates"], refazer=params["refazer"],
+                                      refazer_manter=params.get("refazer_manter"))
                     restantes.remove(pt)   # esta parte fechou → sai da fila de retomada
             except Exception as e:  # noqa: BLE001
                 interrompido = True

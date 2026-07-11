@@ -335,20 +335,46 @@ def _preparar_projeto_p2(parent, slug, log):
     p2 = projeto_por_slug(slug + "-p2")
     log("Parte 2 → projeto separado: %s" % p2.dir)
 
-    if not p2.existe(p2.roteiro):
-        p2.roteiro.write_text(p2_txt.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    # roteiro.txt da P2 = a Tab 2 do card (parent/roteiro_p2.txt). AUTO-CURA: se já existir mas
+    # com conteúdo DIFERENTE da Tab 2 atual, foi clobberado (ex.: a Etapa 1 rodou nesta pasta e
+    # gravou a Parte 1 — bug do card 84, 2026-07-11). Re-semeia com a Parte 2 correta e LIMPA as
+    # etapas de CONTEÚDO (3-7), que foram geradas da história errada, pra regenerarem certas.
+    novo_rot = p2_txt.read_text(encoding="utf-8", errors="replace")
+    atual_rot = p2.roteiro.read_text(encoding="utf-8", errors="replace") if p2.existe(p2.roteiro) else None
+    if atual_rot is None:
+        p2.roteiro.write_text(novo_rot, encoding="utf-8")
         log("  P2: roteiro.txt semeado a partir de roteiro_p2.txt.")
+    elif atual_rot.strip() != novo_rot.strip():
+        p2.roteiro.write_text(novo_rot, encoding="utf-8")
+        log("  ⚠ P2: roteiro.txt estava com a HISTÓRIA ERRADA (≠ Tab 2 do card) — re-semeado com "
+            "a Parte 2 correta; regenerando narração→entrega (Etapas 3-8) da história certa.")
+        for n in (3, 4, 5, 6, 7, 8):
+            _limpar_etapa(p2, n, log)
 
-    if not p2.existe(p2.source) and parent.existe(parent.source):
+    # source.json da P2: precisa de parte='p2' (Etapa 3 = voz dupla) e nome_card ' - P2' (Etapa 8
+    # agrupa por card). AUTO-CURA: se faltar (semente nova) OU se existir SEM parte='p2' (foi
+    # gravado pela Etapa 1 como se fosse P1), (re)grava a partir do source correto da P1.
+    precisa_source = not p2.existe(p2.source)
+    if not precisa_source:
+        try:
+            atual_src = json.loads(p2.source.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            atual_src = {}
+        precisa_source = str(atual_src.get("parte", "")).lower() != "p2"
+        if precisa_source:
+            log("  ⚠ P2: source.json estava sem parte='p2' (gravado como P1) — corrigindo.")
+    if precisa_source and parent.existe(parent.source):
         try:
             src = json.loads(parent.source.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
             src = {}
         base_nome = src.get("nome_card") or src.get("titulo") or parent.dir.name
-        src["nome_card"] = "%s - P2" % base_nome
+        if not base_nome.endswith(" - P2"):
+            base_nome = "%s - P2" % base_nome
+        src["nome_card"] = base_nome
         src["parte"] = "p2"
         p2.source.write_text(json.dumps(src, ensure_ascii=False, indent=2), encoding="utf-8")
-        log("  P2: source.json semeado (nome_card='%s')." % src["nome_card"])
+        log("  P2: source.json semeado/corrigido (parte=p2, nome_card='%s')." % src["nome_card"])
 
     # Reaproveita personagens da P1 (mesmos) → pula Etapas 1 e 2 na P2.
     import shutil
@@ -428,7 +454,7 @@ def _resumo_tempos(proj, tempos, total, log):
 
 def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
              slug=None, card_query="Alpha King", card_id=None, categoria=None,
-             parte="p1", pular_gates=False, refazer=False, **extra):
+             parte="p1", pular_gates=False, refazer=False, refazer_manter=None, **extra):
     t0 = time.perf_counter()
     etapas = set(etapas or TODAS)
     parent = _garantir_projeto(slug, log)
@@ -440,7 +466,16 @@ def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
         return parent
     proj = projeto_por_slug(slug + "-p2") if p2_mode else parent
     if refazer:
+        # `refazer_manter` = etapas a PRESERVAR mesmo no refazer (ex.: {5} = "reutilizar as imagens
+        # que já deram certo"). A etapa preservada não é limpa → roda idempotente (reusa o artefato)
+        # e, no caso das imagens, o QA ainda regenera só as bugadas. Sem crédito Magnific à toa.
+        manter = set(refazer_manter or ())
         for n in sorted(etapas):
+            if n in manter:
+                log("  refazer: MANTENHO a Etapa %d (%s) — reutilizando o que já deu certo "
+                    "(não limpo; o QA ainda conserta o que estiver ruim)."
+                    % (n, STAGE_LABELS.get(n, STAGES[n][0])))
+                continue
             _limpar_etapa(proj, n, log)
     # Semeia a P2 DEPOIS do refazer (a semente é idempotente e restaura roteiro/source/bible
     # que o refazer possa ter limpado — assim a Etapa 1 não rebaixa a P1 pra dentro da P2).
@@ -498,7 +533,14 @@ def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
 
 
 def _limpar_etapa(proj, n, log):
-    """Apaga o artefato-âncora da etapa (força regeneração). Best-effort."""
+    """Apaga o artefato-âncora da etapa (força regeneração). Best-effort.
+
+    Refazer = do ZERO: além do âncora, apaga também as MÍDIAS DERIVADAS da etapa via
+    _limpar_render (narração mp3/raw/_tts_, out/ INTEIRO, capas .mp4). Sem isto, o âncora de
+    algumas etapas cobria só parte da mídia — a 3 tirava só narration.srt (deixando o .mp3) e a
+    7 tirava só out/final.mp4 (deixando os segmentos) — então a montagem reusava áudio/segmento
+    velho e o vídeo saía "igual" mesmo com Refazer. Agora "refazer tudo" limpa TODA a mídia antiga
+    e as novas são sempre regeradas do zero (2026-07-11)."""
     import shutil
     alvo = STAGES[n][1]
     p = proj.dir / (alvo.split("/*", 1)[0] if "*" in alvo else alvo)
@@ -510,6 +552,8 @@ def _limpar_etapa(proj, n, log):
         except OSError:
             pass
     log("  refazer: limpei %s" % p.name)
+    # No-op nas etapas sem render (só 3/6/7 têm derivados); best-effort.
+    _limpar_render(proj, n, log)
 
 
 def _gate(proj, n, log, cancel):

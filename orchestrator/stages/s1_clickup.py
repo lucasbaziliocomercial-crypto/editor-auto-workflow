@@ -203,11 +203,18 @@ def _contar_caps(texto):
 # run()
 # ---------------------------------------------------------------------------
 
-def run(proj, log, cancel=None, *, card_id=None, categoria=None, **_):
+def run(proj, log, cancel=None, *, card_id=None, categoria=None, parte="p1", **_):
     if not card_id:
         raise ErroPipeline(
             "Etapa 1 precisa do id do card: rode com --card <task_id> "
             "(ex.: --card 86aj5ex59).")
+
+    # P2-awareness: numa pasta de Parte 2 (slug '…-p2') OU rodando com parte='p2', o roteiro
+    # DESTE projeto é a Tab 2 (Parte 2), NÃO a Tab 1. Sem isto, rodar a Etapa 1 apontada pra
+    # pasta '-p2' (ex.: um "Continuar/Refazer" que a trate como card P1) sobrescrevia
+    # roteiro.txt com a Parte 1 — a montagem então saía com o FORMATO da P2 mas a HISTÓRIA da
+    # P1 (bug do card 84, 2026-07-11). A pasta manda: quem nasce '-p2' processa a Tab 2.
+    is_p2 = str(parte).lower() == "p2" or proj.dir.name.endswith("-p2")
 
     log("Lendo card %s no ClickUp…" % card_id)
     task = clickup_api._get("/task/%s" % card_id)
@@ -233,17 +240,29 @@ def run(proj, log, cancel=None, *, card_id=None, categoria=None, **_):
 
     roteiro_p1 = abas[1].strip()
     roteiro_p2 = (abas.get(2) or "").strip()
+
+    # Numa pasta '-p2', o roteiro DESTE projeto é a Tab 2. Sem Tab 2 no Doc não há P2 a montar.
+    if is_p2 and not roteiro_p2:
+        raise ErroPipeline(
+            "Este é um projeto de Parte 2 (%s), mas o Doc %s NÃO tem Tab 2 (Parte 2) — só P1. "
+            "Não há Parte 2 a gerar para este card." % (proj.dir.name, doc_id))
+
+    # `alvo` = o roteiro que ESTE projeto processa (Tab 2 na P2, Tab 1 na P1). Toda a validação
+    # e a escrita de roteiro.txt passam a ser sobre o alvo — assim a pasta '-p2' nunca recebe a P1.
+    alvo = roteiro_p2 if is_p2 else roteiro_p1
+    rot_alvo = "Tab 2" if is_p2 else "Tab 1"
+
     # Guarda: o roteiro DEVE estar em inglês com cabeçalhos "Chapter N —" (é o que a
     # esteira parseia). Zero capítulos = Doc errado (quase sempre a versão PT rotulada
     # "Roteiro em português") — falha ALTO aqui, senão a Etapa 3 gera narração do texto
     # errado e a Etapa 4 só quebra bem depois. Override manual: env ROTEIRO_DOC_URL.
-    if _contar_caps(roteiro_p1) == 0:
+    if _contar_caps(alvo) == 0:
         total_caps = _contar_caps(txt)
         raise ErroPipeline(
-            "O Doc %s (Tab 1) ficou sem NENHUM capítulo em inglês (linhas 'Chapter N —'). "
+            "O Doc %s (%s) ficou sem NENHUM capítulo em inglês (linhas 'Chapter N —'). "
             "O Doc inteiro tem %d capítulos e %d abas achadas (%s). %s "
             "Se preciso, force com a env ROTEIRO_DOC_URL=<link do Doc EN> antes da Etapa 1." % (
-                doc_id, total_caps, len(abas), sorted(abas),
+                doc_id, rot_alvo, total_caps, len(abas), sorted(abas),
                 "Provavelmente é a versão em PORTUGUÊS (ou premissa), não o roteiro EN — "
                 "confira o comentário do Doc EN no card." if total_caps == 0 else
                 "O Doc EN foi baixado certo, mas a separação de abas caiu numa aba vazia — "
@@ -252,30 +271,35 @@ def run(proj, log, cancel=None, *, card_id=None, categoria=None, **_):
     # (Doc PT que manteve os títulos em inglês). Narração PT + legenda EN destroçada é o
     # pior dos mundos — TRAVA aqui e exige o Doc EN (decisão do editor 2026-07-09). Só vale
     # no modo inglês; no modo teste (LONGFORM_IDIOMA=pt) o PT é intencional e passa.
-    if parece_portugues(roteiro_p1):
+    if parece_portugues(alvo):
         raise ErroPipeline(
-            "O Doc %s (Tab 1) está em PORTUGUÊS — a esteira produz vídeo em inglês, então a "
+            "O Doc %s (%s) está em PORTUGUÊS — a esteira produz vídeo em inglês, então a "
             "narração sairia em PT com legenda EN destroçada. Aponte o COMENTÁRIO do roteiro "
             "EN no card (evite os rotulados 'Roteiro em português'/'Premissa') ou force com a "
             "env ROTEIRO_DOC_URL=<link do Doc EN>. (Só pra teste em PT: LONGFORM_IDIOMA=pt.)"
-            % doc_id)
-    if roteiro_p2 and parece_portugues(roteiro_p2):
+            % (doc_id, rot_alvo))
+    # Na P1, avisa também se a Tab 2 vier em PT (o vídeo da P2 sairia narrado em PT).
+    if not is_p2 and roteiro_p2 and parece_portugues(roteiro_p2):
         raise ErroPipeline(
             "O Doc %s tem a Tab 2 (Parte 2) em PORTUGUÊS. O vídeo da P2 sairia narrado em PT. "
             "Corrija a Tab 2 do Doc EN (ou aponte o Doc EN certo) antes de rodar." % doc_id)
-    proj.roteiro.write_text(roteiro_p1, encoding="utf-8")
-    log("  P1 (Tab 1): %d caps, %d palavras -> %s"
-        % (_contar_caps(roteiro_p1), len(roteiro_p1.split()), proj.roteiro.name))
-    if roteiro_p2:
-        (proj.dir / "roteiro_p2.txt").write_text(roteiro_p2, encoding="utf-8")
-        log("  P2 (Tab 2): %d caps, %d palavras -> roteiro_p2.txt"
-            % (_contar_caps(roteiro_p2), len(roteiro_p2.split())))
-    else:
-        log("  (sem Tab 2 — card só tem P1)")
+
+    proj.roteiro.write_text(alvo, encoding="utf-8")
+    log("  %s (%s): %d caps, %d palavras -> %s"
+        % ("P2" if is_p2 else "P1", rot_alvo, _contar_caps(alvo), len(alvo.split()), proj.roteiro.name))
+    # roteiro_p2.txt (a Tab 2 "crua") só é gravado na P1 — é o que a semeadura da P2
+    # (_preparar_projeto_p2) consome. Na pasta '-p2' o alvo JÁ é a Tab 2 em roteiro.txt.
+    if not is_p2:
+        if roteiro_p2:
+            (proj.dir / "roteiro_p2.txt").write_text(roteiro_p2, encoding="utf-8")
+            log("  P2 (Tab 2): %d caps, %d palavras -> roteiro_p2.txt"
+                % (_contar_caps(roteiro_p2), len(roteiro_p2.split())))
+        else:
+            log("  (sem Tab 2 — card só tem P1)")
 
     source = {
         "card_id": card_id,
-        "nome_card": nome_card,
+        "nome_card": ("%s - P2" % nome_card) if is_p2 else nome_card,
         "canal": canal,
         "canal_slug": slugify(canal or "sem-canal", maxlen=40),
         "categoria": categoria or slugify(canal or "sem-canal", maxlen=40),
@@ -287,9 +311,11 @@ def run(proj, log, cancel=None, *, card_id=None, categoria=None, **_):
         "n_caps_p1": _contar_caps(roteiro_p1),
         "n_caps_p2": _contar_caps(roteiro_p2) if roteiro_p2 else 0,
     }
+    if is_p2:
+        source["parte"] = "p2"
     proj.source.write_text(json.dumps(source, ensure_ascii=False, indent=2), encoding="utf-8")
-    log("  source.json gravado (canal=%s, caps P1=%d / P2=%d)."
-        % (source["canal"], source["n_caps_p1"], source["n_caps_p2"]))
+    log("  source.json gravado (canal=%s, parte=%s, caps P1=%d / P2=%d)."
+        % (source["canal"], "p2" if is_p2 else "p1", source["n_caps_p1"], source["n_caps_p2"]))
 
 
 # --- teste standalone: py -3 stages/s1_clickup.py <card_id> [slug] --------------------
