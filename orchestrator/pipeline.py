@@ -201,18 +201,24 @@ def _limpar_render(proj, n, log):
             log("  limpei %d capa(s) p/ regerar." % apagados)
 
 
-def _etapa_pronta(proj, n, log=None):
-    """True se o artefato-âncora da etapa n já existe (base da idempotência/‘Continuar’)."""
+def _etapa_pronta(proj, n, log=None, continuar=False):
+    """True se o artefato-âncora da etapa n já existe (base da idempotência/‘Continuar’).
+
+    `continuar` = retomada após erro/parada (botão Continuar): o objetivo é RESUMIR, então
+    confiamos no artefato e NÃO aplicamos as travas de obsolescência abaixo — elas são de RUN
+    FRESCO (auto-heal) e, no resume, fariam a etapa recomeçar do zero (queixa recorrente)."""
     alvo = STAGES[n][1]
     if "*" in alvo:
         d, pad = alvo.split("/", 1)
         pronta = bool(list((proj.dir / d).glob(pad)))
     else:
         pronta = proj.existe(proj.dir / alvo)
+    if continuar:
+        return pronta
     # Anti-áudio-velho (o problema de sincronia do 256): marcar a etapa NÃO-pronta força o
     # pipeline a chamar o run() dela. Etapa 3 = narração de outro draft; Etapa 7 = montagem de
     # um áudio anterior (após a Etapa 3 regenerar). Sem isto, a re-rodada 'já pronta' pula tudo
-    # e o vídeo sai/continua dessincronizado.
+    # e o vídeo sai/continua dessincronizado. (Só num RUN FRESCO — no Continuar é pulado acima.)
     if pronta and n == 3 and _narracao_obsoleta(proj):
         if log:
             log("Etapa 3 (s3_narracao): narração é de outro draft do roteiro — regenerando p/ sincronizar.")
@@ -454,7 +460,8 @@ def _resumo_tempos(proj, tempos, total, log):
 
 def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
              slug=None, card_query="Alpha King", card_id=None, categoria=None,
-             parte="p1", pular_gates=False, refazer=False, refazer_manter=None, **extra):
+             parte="p1", pular_gates=False, refazer=False, refazer_manter=None,
+             continuar=False, **extra):
     t0 = time.perf_counter()
     etapas = set(etapas or TODAS)
     parent = _garantir_projeto(slug, log)
@@ -493,7 +500,11 @@ def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
             if not refazer:
                 # Código da etapa mudou desde o último artefato? (senão a idempotência reusa o
                 # antigo — foi por isso que o card 256 saiu "igual" mesmo com o código mudado.)
-                dep = _codigo_desatualizado(proj, n)
+                # No CONTINUAR (retomada após erro/parada) o auto-rebuild é DESLIGADO: o objetivo
+                # é RESUMIR de onde parou, não reaplicar mudanças de código. Se ele agisse aqui,
+                # apagaria narração/out (etapas 3/6/7) e o Continuar "começaria do zero" — queixa
+                # recorrente da editora (2026-07-11). Aplicar código novo é papel do "Rodar"/"Refazer".
+                dep = None if continuar else _codigo_desatualizado(proj, n)
                 if dep and n in _AUTO_REBUILD_STAGES:
                     # LOCAL/GRÁTIS (3/6/7): re-roda e limpa o cache p/ as mudanças reaplicarem.
                     log("Etapa %d (%s): código novo (%s) desde o último render — refazendo p/ aplicar as mudanças."
@@ -506,7 +517,7 @@ def pipeline(alvo=None, etapas=TODAS, log=print, cancel=None, *,
                         log("Etapa %d (%s): código novo (%s) desde o último artefato — NÃO refiz sozinho "
                             "(etapa custosa). Rode “Refazer” nesta etapa quando quiser reaplicar."
                             % (n, nome_mod, dep))
-                    if _etapa_pronta(proj, n, log):
+                    if _etapa_pronta(proj, n, log, continuar=continuar):
                         log("Etapa %d (%s): já pronta — pulando." % (n, nome_mod))
                         continue
             log("── Etapa %d — %s ─────────────────────────" % (n, nome_mod))

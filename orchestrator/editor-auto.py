@@ -852,6 +852,8 @@ class App:
             self._log("Nada para continuar — rode uma vez primeiro."); return
         params = dict(self.ultima_run)
         params["refazer"] = False   # continuar jamais limpa artefatos já concluídos
+        params["continuar"] = True  # RESUME puro: desliga o auto-rebuild "código novo → refaço"
+        # (senão apagaria narração/out e recomeçaria do zero — ver pipeline._etapa_pronta).
         partes = params.get("partes") or []
         onde = " → ".join(p.upper() for p in partes) if partes else "?"
         self._log("▶▶ Continuando de onde parou (%s; etapas já concluídas serão puladas)…" % onde)
@@ -885,7 +887,8 @@ class App:
                                       slug=params["slug"], card_id=params["card"],
                                       categoria=params["categoria"], parte=pt,
                                       pular_gates=params["pular_gates"], refazer=params["refazer"],
-                                      refazer_manter=params.get("refazer_manter"))
+                                      refazer_manter=params.get("refazer_manter"),
+                                      continuar=params.get("continuar", False))
                     restantes.remove(pt)   # esta parte fechou → sai da fila de retomada
             except Exception as e:  # noqa: BLE001
                 interrompido = True
