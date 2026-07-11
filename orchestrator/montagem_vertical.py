@@ -8,7 +8,8 @@ Reproduz a ESTRUTURA que o Romance Maker montava no CapCut, mas RENDERIZA um MP4
     └ clipes drop-in mudos, cortados p/ durar o GANCHO falado; narração do gancho por baixo
                     └ corpo = imagens do capítulo (Ken Burns) sincronizadas à narração daquele cap.
                        ENTRE as imagens do corpo há um DISSOLVE (crossfade) suave (_corpo_xfade, ~0.4s);
-                       o teaser NÃO leva dissolve (corte seco). ⬛ = TELA PRETA de respiro (~1s,
+                       ENTRE os takes do teaser também há o MESMO dissolve (_teaser_xfade, default =
+                       _corpo_xfade; editora 2026-07-11 — antes o teaser era corte seco). ⬛ = TELA PRETA de respiro (~1s,
                        _blackgap_dur) entre TODA transição de segmento DO 1º CAPÍTULO EM DIANTE — capa,
                        corpo E peças do rabo (a editora achou os cortes "secos", prints da timeline
                        2026-07-10). O teaser/intro (antes da 1ª capa) FLUI sem preto; nunca há preto no
@@ -403,6 +404,12 @@ def _fonte_legenda_arquivo(nome):
     alvo = re.sub(r"[^a-z0-9]", "", (nome or "").lower())
     if not alvo:
         return None
+    # Apelidos p/ famílias cujo NOME não bate com o STEM do arquivo no Windows (ex.: a família
+    # "Arial Black" vive em ariblk.ttf; "Arial Bold" em arialbd.ttf). Sem isto o match exato/por
+    # prefixo falha e a fonte pesada da CTA (opção da editora) não resolveria pelo fontsdir.
+    _ALIAS = {"arialblack": "ariblk", "arialbold": "arialbd", "arialbolditalic": "arialbi",
+              "arialitalic": "ariali", "arial": "arial", "impact": "impact"}
+    alvo = _ALIAS.get(alvo, alvo)
     base = Path(__file__).resolve().parent.parent / "assets" / "fonts"
     win = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
     cands = []
@@ -825,23 +832,47 @@ def _kb_amp():
     return max(0.0, z), max(0.0, min(1.0, p))
 
 
-def _kb_expr(mode, frames):
-    """Expressões zoompan (z, x, y) p/ um preset, com movimento CONTÍNUO e EASE-IN-OUT
-    (smoothstep p²(3-2p)) — acelera/desacelera nas pontas, dando a sensação cinematográfica da
-    long-form (a câmera "respira" em vez de deslizar linear). Amplitude/alcance via _kb_amp().
-    x/y ficam sempre dentro dos limites (o pan escala pela margem do próprio zoom → sem borda preta)."""
+def _kb_ciclo_s():
+    """Período (s) de UM ciclo de 'respiração' do Ken Burns (zoom in→out→in). O movimento passa a
+    OSCILAR num ciclo curto e FIXO, independente de quanto tempo a imagem fica na tela. É o conserto
+    do 'não vejo o zoom' (2026-07-11): no corpo, cada imagem fica ~66s no ar e o ease único diluía os
+    28% de zoom em 66s (~0,4%/s = imperceptível). Com ciclo de 12s a imagem respira ~4,7%/s → zoom
+    SEMPRE visível, sem custo e sem repetir imagem. Só afeta imagem MAIS LONGA que um ciclo; clipe
+    curto (teaser/hook) mantém o zoom completo único de antes. 0 = legado. Env: ROTEIRO_KENBURNS_CICLO."""
+    try:
+        return max(0.0, float(os.environ.get("ROTEIRO_KENBURNS_CICLO", "12")))
+    except (TypeError, ValueError):
+        return 12.0
+
+
+def _kb_expr(mode, frames, fps):
+    """Expressões zoompan (z, x, y) p/ um preset, com movimento CONTÍNUO. Duas curvas de progressão
+    `b` (0→1→0 ou 0→1), ambas com ease nas pontas:
+      • RESPIRAÇÃO (imagem longa): b = cosseno num ciclo fixo de _kb_ciclo_s() s → a câmera respira
+        (aproxima e afasta) o tempo TODO, independente da duração da imagem. Conserta o zoom
+        'sumido' no corpo (imagem ~66s no ar). O cosseno já traz o ease nas viradas.
+      • EASE ÚNICO (imagem curta / ciclo=0): b = smoothstep p²(3-2p), um zoom completo por toda a
+        duração — comportamento legado, preservado p/ teaser/hook curtos.
+    Amplitude/alcance via _kb_amp(). x/y ficam sempre dentro dos limites (o pan escala pela margem do
+    próprio zoom → sem borda preta), oscilando junto com `b` (sem deriva)."""
     zdir, fx0, fx1, fy0, fy1 = mode
     zamp, pfrac = _kb_amp()
     d = max(1, frames - 1)
-    p = "(on/%d)" % d
-    e = "(%s*%s*(3-2*%s))" % (p, p, p)                       # smoothstep 0->1
-    if zdir >= 0:
-        z = "1.0+(%.4f)*%s" % (zamp, e)                      # zoom-in  1.0 -> 1+amp
+    ciclo = _kb_ciclo_s()
+    cf = max(2.0, ciclo * float(fps)) if ciclo > 0.01 else 0.0
+    if cf and frames > cf:
+        # respiração contínua: 0 no início, 1 no meio do ciclo, 0 ao fim — repete a cada `cf` frames.
+        b = "(0.5-0.5*cos(2*PI*on/%.3f))" % cf
     else:
-        z = "1.0+(%.4f)-(%.4f)*%s" % (zamp, zamp, e)         # zoom-out 1+amp -> 1.0
-    # pan fx/fy: de fx0->fx1 (fração [-1,1] da margem livre) com a MESMA curva ease, escalado por PAN_FRAC.
-    fx = "((%.3f)+(%.3f)*%s)*%.3f" % (fx0, fx1 - fx0, e, pfrac)
-    fy = "((%.3f)+(%.3f)*%s)*%.3f" % (fy0, fy1 - fy0, e, pfrac)
+        p = "(on/%d)" % d
+        b = "(%s*%s*(3-2*%s))" % (p, p, p)                   # smoothstep 0->1 (ease único legado)
+    if zdir >= 0:
+        z = "1.0+(%.4f)*%s" % (zamp, b)                      # respira p/ DENTRO (1.0 ↔ 1+amp)
+    else:
+        z = "1.0+(%.4f)*(1-%s)" % (zamp, b)                  # respira p/ FORA  (1+amp ↔ 1.0)
+    # pan fx/fy: de fx0->fx1 (fração [-1,1] da margem livre) com a MESMA curva `b`, escalado por PAN_FRAC.
+    fx = "((%.3f)+(%.3f)*%s)*%.3f" % (fx0, fx1 - fx0, b, pfrac)
+    fy = "((%.3f)+(%.3f)*%s)*%.3f" % (fy0, fy1 - fy0, b, pfrac)
     # centro do crop = iw/2 - iw/zoom/2; deslocamento = fração fx do espaço livre (= o próprio centro).
     x = "(1+%s)*(iw/2-iw/zoom/2)" % fx
     y = "(1+%s)*(ih/2-ih/zoom/2)" % fy
@@ -895,8 +926,9 @@ def _corpo_xfade():
     corpo — a transição 'do Shotcut' que a editora sempre usou p/ dar dinâmica sem sujar a imagem
     (decisão da editora 2026-07-10). Distinto do _kb_fade_frames (dip-to-black): aqui as cenas se
     FUNDEM uma na outra, sem passar pelo preto. Default 0.4s; 0/off = corte seco (concat, o antigo).
-    Só entra no CORPO (o teaser fica com corte seco, pra o gancho continuar punchy). Cenas curtas
-    demais (imagem <= 1.5·xfade) caem no concat automaticamente. Env: ROTEIRO_CORPO_XFADE."""
+    Entra no CORPO e, desde 2026-07-11, também ENTRE os takes do teaser (via _teaser_xfade, que por
+    default reusa este valor). Cenas curtas demais (imagem <= 1.5·xfade) caem no concat
+    automaticamente. Env: ROTEIRO_CORPO_XFADE."""
     v = os.environ.get("ROTEIRO_CORPO_XFADE", "0.4").strip().lower()
     if v in ("0", "off", "none", "nao", "não", "no", "false", ""):
         return 0.0
@@ -904,6 +936,23 @@ def _corpo_xfade():
         return max(0.0, float(v))
     except (TypeError, ValueError):
         return 0.4
+
+
+def _teaser_xfade():
+    """Duração (s) do CROSSFADE (dissolve) ENTRE os takes do TEASER (gancho) da isca — a MESMA
+    transição suave das imagens do corpo (_corpo_xfade), agora também nos cortes do teaser (pedido
+    da editora 2026-07-11: 'as mesmas transições das imagens, também entre os takes do teaser').
+    Antes o teaser era corte seco de propósito; agora dissolve. Default = _corpo_xfade();
+    ROTEIRO_TEASER_XFADE define um valor próprio (s) ou 0/off desliga (volta ao corte seco)."""
+    v = os.environ.get("ROTEIRO_TEASER_XFADE", "").strip().lower()
+    if v in ("0", "off", "none", "nao", "não", "no", "false"):
+        return 0.0
+    if v:
+        try:
+            return max(0.0, float(v))
+        except (TypeError, ValueError):
+            pass
+    return _corpo_xfade()
 
 
 def _corpo_paralelo():
@@ -947,8 +996,13 @@ def _prescale_img(ff, img, sw, sh, cache_dir, log):
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         import hashlib
+        # A chave inclui mtime+tamanho da FONTE: regenerar img_NNN.png (mesmo nome) muda o mtime e
+        # invalida o cache — senão a montagem reusa o PNG pré-escalado ANTIGO e o vídeo sai com a
+        # imagem velha mesmo depois de trocar as mídias. (bug corrigido 2026-07-11.)
+        st = os.stat(str(img))
         chave = hashlib.md5(
-            ("%s|%d|%d" % (os.path.abspath(str(img)), sw, sh)).encode("utf-8")).hexdigest()[:16]
+            ("%s|%d|%d|%d|%d" % (os.path.abspath(str(img)), sw, sh, int(st.st_mtime), st.st_size)
+             ).encode("utf-8")).hexdigest()[:16]
         dest = cache_dir / ("%s.png" % chave)
         if dest.exists() and dest.stat().st_size > 0:
             return dest
@@ -1016,7 +1070,7 @@ def _kenburns_imagens(ff, imgs, dur, w, h, fps, out, log, fade_edges=(0.0, 0.0))
         # saída por frame de entrada, e `on` (0..frames-1) dá a progressão. O movimento é função de
         # `on` (NÃO acumulador com teto), então nunca congela. Super-amostra (sw×sh, lanczos) p/ não
         # serrilhar e p/ o zoompan arredondar numa grade fina (anti-tremido). tmix funde o judder.
-        z, x, y = _kb_expr(_KB_MODES[k % len(_KB_MODES)], frames)
+        z, x, y = _kb_expr(_KB_MODES[k % len(_KB_MODES)], frames, fps)
         pre = _prescale_img(ff, img, sw, sh, cache_dir, log)   # escala 1x (não por-frame) → ~1.3x
         inputs += ["-loop", "1", "-framerate", str(fps), "-t", "%.3f" % seg, "-i", str(pre or img)]
         chain = []
@@ -1382,30 +1436,85 @@ def _clip_para_dur(ff, src, dur, w, h, fps, out, log):
     return out.exists() and out.stat().st_size > 0
 
 
-def _concat_videos_trim(ff, clips, duracoes, w, h, fps, out, log):
-    """Concatena os clipes de teaser (mudos), cada um entregue na sua duração-alvo `duracoes[k]`
-    (cortes alinhados aos beats do gancho — ver _teaser_plano). Cada clipe é enquadrado em w×h."""
-    if not clips:
-        return _tela_cor(ff, sum(duracoes) or 1.0, w, h, fps, out, log)
-    partes = []
+def _teaser_xfade_concat(ff, clips, duracoes, xf, w, h, fps, out, log):
+    """Concatena os takes do teaser com DISSOLVE (xfade=fade) de `xf`s entre cada par — a MESMA
+    transição das imagens do corpo, agora nos cortes do teaser (editora 2026-07-11). Cada take é
+    renderizado com +xf de folga p/ a sobreposição não comer o hold (o visível continua ~duracoes[k]),
+    e os offsets do xfade saem das durações REAIS dos clipes (ver _kenburns_imagens). Devolve
+    True/False — o chamador cai no corte seco (concat) se isto falhar (build sem xfade etc.)."""
     tmp = out.parent
+    partes, plens = [], []
     for k, c in enumerate(clips):
         dur = duracoes[k] if k < len(duracoes) else (duracoes[-1] if duracoes else 1.0)
-        pc = tmp / ("_teaser_%02d.mp4" % k)
-        _clip_para_dur(ff, c, dur, w, h, fps, pc, log)
-        if pc.exists() and pc.stat().st_size > 0:
-            partes.append(pc)
-    if not partes:
-        return _tela_cor(ff, sum(duracoes) or 1.0, w, h, fps, out, log)
-    lista = tmp / "_teaser_concat.txt"
-    lista.write_text("".join("file '%s'\n" % p.name for p in partes), encoding="utf-8")
-    _run([ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
-          "-i", str(lista), "-c", "copy", str(out)], log, "teaser-concat")
-    lista.unlink(missing_ok=True)
+        pc = tmp / ("_teaserx_%02d.mp4" % k)
+        if not _clip_para_dur(ff, c, dur + xf, w, h, fps, pc, log) or not (
+                pc.exists() and pc.stat().st_size > 0):
+            for p in partes:
+                p.unlink(missing_ok=True)
+            return False
+        partes.append(pc)
+        plens.append(_dur(ff, pc) or (dur + xf))
+    if len(partes) < 2:
+        for p in partes:
+            p.unlink(missing_ok=True)
+        return False
+    # Normaliza cada input (format/sar/fps/timebase iguais — exigência do xfade) e encadeia os pares.
+    inputs, fmt, labels = [], [], []
+    for k, p in enumerate(partes):
+        inputs += ["-i", str(p)]
+        fmt.append("[%d:v]format=yuv420p,setsar=1,fps=%d,settb=AVTB[v%d]" % (k, fps, k))
+        labels.append("[v%d]" % k)
+    chain, prev, acc = [], labels[0], plens[0]
+    for k in range(1, len(partes)):
+        lbl = "[x%d]" % k
+        chain.append("%s%sxfade=transition=fade:duration=%.3f:offset=%.3f%s"
+                     % (prev, labels[k], xf, max(0.0, acc - xf), lbl))
+        prev, acc = lbl, acc + plens[k] - xf
+    fc = ";".join(fmt) + ";" + ";".join(chain)
+    _run([ff, "-y", "-hide_banner", "-loglevel", "error", *inputs,
+          "-filter_complex", fc, "-map", prev, *_venc_args(fps), "-an", str(out)],
+         log, "teaser-xfade")
     for p in partes:
         p.unlink(missing_ok=True)
-    if not (out.exists() and out.stat().st_size > 0):
-        return False
+    return out.exists() and out.stat().st_size > 0
+
+
+def _concat_videos_trim(ff, clips, duracoes, w, h, fps, out, log):
+    """Junta os clipes de teaser (mudos), cada um na sua duração-alvo `duracoes[k]` (cortes alinhados
+    aos beats do gancho — ver _teaser_plano), enquadrados em w×h. Com _teaser_xfade()>0 e >=2 takes,
+    as viradas levam um DISSOLVE (a mesma transição das imagens; editora 2026-07-11); senão, ou se o
+    dissolve falhar, cai no concat de corte seco."""
+    if not clips:
+        return _tela_cor(ff, sum(duracoes) or 1.0, w, h, fps, out, log)
+    tmp = out.parent
+    feito = False
+    xf = _teaser_xfade()
+    if xf > 0.01 and len(clips) >= 2:
+        if _teaser_xfade_concat(ff, clips, duracoes, xf, w, h, fps, out, log):
+            log("    teaser: dissolve (%.2fs) entre os %d take(s) — a mesma transição das imagens."
+                % (xf, len(clips)))
+            feito = True
+        else:
+            log("    ⚠ teaser: dissolve (xfade) falhou — refazendo com corte seco (concat).")
+    if not feito:
+        partes = []
+        for k, c in enumerate(clips):
+            dur = duracoes[k] if k < len(duracoes) else (duracoes[-1] if duracoes else 1.0)
+            pc = tmp / ("_teaser_%02d.mp4" % k)
+            _clip_para_dur(ff, c, dur, w, h, fps, pc, log)
+            if pc.exists() and pc.stat().st_size > 0:
+                partes.append(pc)
+        if not partes:
+            return _tela_cor(ff, sum(duracoes) or 1.0, w, h, fps, out, log)
+        lista = tmp / "_teaser_concat.txt"
+        lista.write_text("".join("file '%s'\n" % p.name for p in partes), encoding="utf-8")
+        _run([ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+              "-i", str(lista), "-c", "copy", str(out)], log, "teaser-concat")
+        lista.unlink(missing_ok=True)
+        for p in partes:
+            p.unlink(missing_ok=True)
+        if not (out.exists() and out.stat().st_size > 0):
+            return False
     # Garantia anti-buraco: o teaser TEM que cobrir a duração-alvo inteira. Se algum clipe
     # falhou ao renderizar (fatia perdida) e o concat ficou curto, duplica o teaser inteiro
     # (stream_loop) até fechar o alvo — evita tela preta/congelada no fim da render final.
