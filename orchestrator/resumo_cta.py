@@ -377,7 +377,8 @@ def _legenda_central_cta(proj, ff, video, audio, w, h, fps, tmp, log):
     """Transcreve o áudio-base da CTA (Whisper) e queima a legenda CENTRALIZADA (meio da tela)
     sobre `video`. Devolve o Path legendado (mudo) ou None (o chamador segue sem — vídeo cru).
     Reusa o fatiamento de UMA linha (MV._preparar_ass) e a fonte/cor da casa, só troca o
-    alinhamento p/ Alignment=5 (meio-centro). `video` e a saída ficam em `tmp` (subtitles roda
+    alinhamento p/ Alignment=10 (meio-centro na convenção SSA do force_style — ver nota abaixo).
+    `video` e a saída ficam em `tmp` (subtitles roda
     com cwd=tmp e nomes relativos p/ escapar o ':' do Windows)."""
     import shutil
     try:
@@ -396,14 +397,21 @@ def _legenda_central_cta(proj, ff, video, audio, w, h, fps, tmp, log):
     fs = os.environ.get("ROTEIRO_CTA_CAPTION_FONTSIZE", str(max(44, int(h * 0.070))))
     # FONTE e COR PRÓPRIAS da CTA (item da editora 2026-07-10: 'o texto do CTA deve ser centralizado
     # e com OUTRA FONTE e COR'). Default = distinto do corpo (corpo = Times amarelo): fonte da casa
-    # 'Playfair Display' + BRANCO. Ambos overridáveis por env. Alignment=5 = centro-centro (já era).
+    # 'Playfair Display' + BRANCO. Ambos overridáveis por env. (O alinhamento meio-centro é o
+    # Alignment=10 aplicado no `style` abaixo — convenção SSA do force_style; ver nota lá.)
     cta_font = (os.environ.get("ROTEIRO_CTA_CAPTION_FONT", "") or "Playfair Display").strip()
     _cor = (os.environ.get("ROTEIRO_CTA_CAPTION_COLOR", "") or "").strip()
     _apel = {"amarelo": "&H0000FFFF", "yellow": "&H0000FFFF",
              "branco": "&H00FFFFFF", "white": "&H00FFFFFF"}
     cta_cor = _apel.get(_cor.lower(), _cor) or "&H00FFFFFF"
+    # Alignment=10 = MEIO-CENTRO. ATENÇÃO: o `force_style` do filtro `subtitles` do ffmpeg
+    # interpreta o Alignment na convenção SSA v4 LEGACY (numpad deslocado), NÃO na ASS v4+ (\an).
+    # Em SSA legacy: 1/2/3 = base L/C/R, 5/6/7 = topo L/C/R, 9/10/11 = meio L/C/R. Por isso o
+    # antigo Alignment=5 caía no TOPO-ESQUERDA (não no centro) e a CTA saía com o texto no canto
+    # de cima (bug 2026-07-10, editora: 'o texto do CTA tem que ficar centralizado'). Meio-centro
+    # = 10. (A legenda global do corpo usa Alignment=2 = base-centro e sempre funcionou.)
     style = ("FontName=%s,Fontsize=%s,Bold=1,PrimaryColour=%s,OutlineColour=&H00000000,"
-             "BackColour=&H64000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=5,MarginV=0"
+             "BackColour=&H64000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=10,MarginV=0"
              % (cta_font, fs, cta_cor))
     fontsdir_frag = ""
     try:

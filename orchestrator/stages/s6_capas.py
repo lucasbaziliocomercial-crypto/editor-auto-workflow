@@ -231,25 +231,37 @@ def run(proj, log, cancel=None, **_):
            cfg["zoom"],
            os.path.basename(cfg["font_path"]) if cfg["font_path"] else "The Seasons (embutida)"))
 
+    # Tolerância (s) ao comparar a duração da capa JÁ existente com a duração-alvo. Fecha o furo
+    # do card 84: a Etapa 6 é idempotente (pula capa_NN.mp4 existente), então uma MUDANÇA de piso
+    # (ex.: o piso de 5s de 2026-07-10) nunca alcançava capas geradas ANTES — a montagem reusava
+    # capas de ~2,5-3s. Agora, se a duração real diverge do alvo além da folga, a capa é REGERADA.
+    tol = _envf("ROTEIRO_COVER_DUR_TOL", 0.35)
     gerados = 0
     for i, titulo in enumerate(titulos, 1):
         if cancel is not None and cancel.is_set():
             raise ErroPipeline("Cancelado pelo usuário.")
-        out = proj.covers_dir / ("capa_%02d.mp4" % i)
-        if out.exists() and out.stat().st_size > 0:
-            log("    capa_%02d.mp4 já existe — pulada." % i)
-            continue
-        bg = str(imgs_cap.get(i)) if imgs_cap.get(i) else None
-        texto = _titulo_capa(i, titulo)
-        cfg_i = cfg
+        # Duração-alvo da capa: PISO de 5s SEMPRE (dmin), com ou sem narração do título. Com fala,
+        # cresce até o teto (dmax) p/ não cortar a voz; sem fala, é o piso sobre a dur da referência.
         sync = ""
         if durs.get(i):
             dur_capa = max(dmin, min(dmax, durs[i] + respiro))
-            cfg_i = dict(cfg, duration_s=round(dur_capa, 2))
             sync = ", %.1fs sync fala" % dur_capa
+        else:
+            dur_capa = max(dmin, cfg["duration_s"])
+        cfg_i = dict(cfg, duration_s=round(dur_capa, 2))
+        out = proj.covers_dir / ("capa_%02d.mp4" % i)
+        if out.exists() and out.stat().st_size > 0:
+            real = _ref_duracao_fps(out)[0]
+            if real is not None and abs(real - dur_capa) <= tol:
+                log("    capa_%02d.mp4 já existe (%.1fs) — pulada." % (i, real))
+                continue
+            log("    capa_%02d.mp4 existe com %.1fs ≠ alvo %.1fs (piso %.0fs) — regenerando."
+                % (i, real or 0.0, dur_capa, dmin))
+        bg = str(imgs_cap.get(i)) if imgs_cap.get(i) else None
+        texto = _titulo_capa(i, titulo)
         covers.generate_cover_video(texto, cfg_i, out, bg_image=bg)
         origem = ("img do cap" if bg else "cor sólida")
-        log("    ✓ capa_%02d.mp4 — \"%s\" (fundo: %s%s)." % (i, texto[:48], origem, sync))
+        log("    ✓ capa_%02d.mp4 — \"%s\" (%.1fs, fundo: %s%s)." % (i, texto[:48], dur_capa, origem, sync))
         gerados += 1
 
     n = len(list(proj.covers_dir.glob("capa_*.mp4")))

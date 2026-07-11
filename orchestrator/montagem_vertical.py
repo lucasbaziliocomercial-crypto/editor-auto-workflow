@@ -793,18 +793,27 @@ def _sfx_mix(ff, base_aud, sfx, dur, out, log, vol):
 # pelo próprio (1-1/zoom), então o pan NUNCA abre borda preta, em QUALQUER zoom. A AMPLITUDE do zoom
 # e o ALCANCE do pan vêm de _kb_amp() (env-tunáveis). Port da esteira long-form (ffmpeg_montagem.py):
 # ease-in-out + amplitude forte + tmix, que MATA a tremedeira do zoompan — ver decisoes-changelog 2026-07-09.
+# NOTA (2026-07-10): PAN default = 0 (_kb_amp), então HOJE os fx/fy abaixo ficam dormentes e cada
+# preset vira ZOOM PURO CENTRAL — só o zdir (in/out) diferencia. A alternância abaixo (in/out/in/out/in)
+# dá o vaivém suave de aproxima/afasta que a editora pediu. Os fx/fy ficam guardados p/ quando
+# ROTEIRO_KENBURNS_PAN>0 reativar o 'passeio' lateral da long-form.
 _KB_MODES = (
     ( 1,  0.0,  0.0,  0.0,  0.0),   # zoom-in central
-    ( 1, -1.0,  1.0,  0.0,  0.0),   # zoom-in + pan esquerda -> direita
-    (-1,  1.0, -1.0,  0.0,  0.0),   # zoom-out + pan direita -> esquerda
-    ( 1,  0.0,  0.0, -1.0,  1.0),   # zoom-in + pan cima -> baixo
-    ( 1, -0.8,  0.8,  0.8, -0.8),   # zoom-in diagonal
+    (-1, -1.0,  1.0,  0.0,  0.0),   # zoom-out central (+ pan E->D se PAN>0)
+    ( 1,  1.0, -1.0,  0.0,  0.0),   # zoom-in central (+ pan D->E se PAN>0)
+    (-1,  0.0,  0.0, -1.0,  1.0),   # zoom-out central (+ pan cima->baixo se PAN>0)
+    ( 1, -0.8,  0.8,  0.8, -0.8),   # zoom-in central (+ pan diagonal se PAN>0)
 )
 
 
 def _kb_amp():
-    """Amplitude do Ken Burns: (ZOOM_AMP, PAN_FRAC). Espelha os defaults da long-form
-    (zoom 1.0->1.28, pan 0.90 da margem livre) — a usuária pediu p/ SENTIR o movimento.
+    """Amplitude do Ken Burns: (ZOOM_AMP, PAN_FRAC). ZOOM = quanto aproxima/afasta; PAN = quanto
+    a câmera 'passeia' de lado.
+    PAN default = 0.0 (2026-07-10, pedido da editora: 'deixar o zoom in e out suave, a tela mexe
+    de um lado pro outro'). Com PAN=0 os presets viram ZOOM PURO CENTRAL (in/out), sem deslocamento
+    lateral — a imagem só aproxima e afasta, centralizada. Os fx/fy dos _KB_MODES ficam DORMENTES
+    (multiplicados por 0). Reative o pan da long-form com ROTEIRO_KENBURNS_PAN=0.90 se algum dia
+    quiser o 'passeio' de volta. O ZOOM segue em 0.28 (mesmo da long-form).
     Env: ROTEIRO_KENBURNS_ZOOM/_PAN (aceita tb os nomes LONGFORM_KENBURNS_ZOOM/_PAN)."""
     def _f(k, alt, d):
         try:
@@ -812,7 +821,7 @@ def _kb_amp():
         except (TypeError, ValueError):
             return d
     z = _f("ROTEIRO_KENBURNS_ZOOM", "LONGFORM_KENBURNS_ZOOM", 0.28)
-    p = _f("ROTEIRO_KENBURNS_PAN", "LONGFORM_KENBURNS_PAN", 0.90)
+    p = _f("ROTEIRO_KENBURNS_PAN", "LONGFORM_KENBURNS_PAN", 0.0)
     return max(0.0, z), max(0.0, min(1.0, p))
 
 
@@ -1987,7 +1996,10 @@ def construir(proj, log, cancel=None, parte=None):
             s = _seg_path("%02d_capa" % n)
             titulo_mp3 = proj.covers_dir / ("titulo_%02d.mp3" % n)
             sfx = _sfx_troca_path()
-            if _seg_fresco(s, titulo_mp3, sfx):
+            # `capa` (capa_NN.mp4) entra como FONTE do frescor: se a Etapa 6 regenerou a capa
+            # (ex.: piso de 5s aplicado a uma capa antiga mais curta), o segmento tem que ser
+            # refeito — senão a montagem reusaria o seg antigo com a duração velha (furo card 84).
+            if _seg_fresco(s, titulo_mp3, sfx, capa):
                 return s
             if not (capa.exists() and capa.stat().st_size > 0):
                 return None

@@ -172,13 +172,15 @@ DEFAULTS = {
     # corpo (canvas maior). Default REDUZIDO de 2.0→1.5 em 2026-07-10 (gargalo da montagem, qualidade
     # neutra pelo tmix — ver decisoes-changelog). Ver tb decisoes-changelog 2026-07-09 (port long-form).
     "ROTEIRO_KB_SUPERSAMPLE": "1.5",
-    # Amplitude do Ken Burns (env-tunável; defaults espelham a long-form — a editora pediu p/ SENTIR
-    # o movimento). ROTEIRO_KENBURNS_ZOOM = 1.0→1.0+z (zoom); ROTEIRO_KENBURNS_PAN = fração da margem
-    # livre usada no pan (0.90 = quase até a borda, sem abrir preto). ROTEIRO_MOTIONBLUR: frames de
-    # motion-blur (tmix) que fundem o judder — sem valor aqui, o código usa 3 em ≤30fps / 2 acima
-    # (0/1 desliga). ROTEIRO_KB_FADE: fade-preto entre imagens do corpo (0=off; 12 = look long-form).
+    # Amplitude do Ken Burns (env-tunável). ROTEIRO_KENBURNS_ZOOM = 1.0→1.0+z (aproxima/afasta);
+    # ROTEIRO_KENBURNS_PAN = fração da margem livre usada no PAN lateral. PAN default = 0.0
+    # (2026-07-10, pedido da editora: 'deixar o zoom in/out suave — a tela mexe de um lado pro
+    # outro'). Com PAN=0 o corpo faz ZOOM PURO CENTRAL (só aproxima/afasta, centralizado), sem
+    # 'passear'. Reative o passeio lateral da long-form com 0.90 se algum dia quiser. ROTEIRO_MOTIONBLUR:
+    # frames de motion-blur (tmix) que fundem o judder — sem valor aqui, o código usa 3 em ≤30fps / 2
+    # acima (0/1 desliga). ROTEIRO_KB_FADE: fade-preto entre imagens do corpo (0=off; 12 = look long-form).
     "ROTEIRO_KENBURNS_ZOOM": "0.28",
-    "ROTEIRO_KENBURNS_PAN": "0.90",
+    "ROTEIRO_KENBURNS_PAN": "0.0",
     # Quantos CORPOS (Ken Burns) renderizar AO MESMO TEMPO. O zoompan do FFmpeg é single-thread, então
     # em fila cada corpo usa ~2-3 núcleos e sobra CPU — o gargalo da montagem. N em paralelo ocupa os
     # núcleos livres SEM mudar o output (mesma cadeia de filtros por capítulo). Teto 4 (limite de
